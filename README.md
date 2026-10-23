@@ -4,6 +4,8 @@ Do epistemic deferral signals beat the optimal score band in a probe-to-LLM casc
 
 October 12 – November 13, 2026 · Prepared October 10, 2026
 
+[Gate 1 Implementation Plan and Training Protocols](docs/gate1_implementation_plan.md) (October 23, 2026) fixes the choices this plan left open: the schedule after kill criterion 3, the data mix, compute and storage, and the training protocols. The gate rules below stay as written. Choices that document still lists as open are due before Monday, October 26.
+
 ## Goal
 
 By Friday, November 13, complete and write up a pre-specified test, on Llama-3-8B-Instruct with public data, of whether any epistemic deferral signal lowers the error of a probe-to-LLM cascade below DeepMind’s optimal two-threshold score band on held-out distribution shifts. Release the harness with it.
@@ -41,6 +43,8 @@ Either outcome is a contribution. A win is new evidence for a better deferral ru
 Compute is small: an estimated one to two GPU-days on a single card for caching and LLM labels.
 
 ## Schedule
+
+The table is the plan as fixed on October 10. Execution dates, and the cuts if kill criterion 3 is applied, are in the [Gate 1 implementation plan](docs/gate1_implementation_plan.md).
 
 | Week      | Work                                                                                                                                | Ends with  |
 |---------------|-----------------------------------------------------------------------------------------------------------------------------------------|----------------|
