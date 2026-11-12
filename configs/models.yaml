@@ -1,0 +1,41 @@
+# Revisions are TBD until stage 00 records the commit SHA of each repo.
+# Load every model with revision=<sha>. Do not change a SHA once it is written.
+monitored:
+  repo: meta-llama/Meta-Llama-3-8B-Instruct
+  revision: TBD
+  dtype: {cuda: bfloat16, mps: float16, cpu: float32}
+guard:
+  repo: meta-llama/Llama-Guard-3-8B
+  revision: TBD
+dedup:
+  repo: sentence-transformers/all-MiniLM-L6-v2
+  revision: TBD
+datasets:
+  wildjailbreak:
+    repo: allenai/wildjailbreak
+    revision: TBD
+  wildchat:
+    repo: allenai/WildChat-1M
+    revision: TBD
+  jailbreak_prompts:
+    repo: TrustAIRLab/in-the-wild-jailbreak-prompts
+    config: jailbreak_2023_12_25
+    revision: TBD
+  strongreject:
+    repo: AlignmentResearch/StrongREJECT
+    split: validation
+    revision: TBD
+  llama3_jailbreaks:
+    repo: Mechanistic-Anomaly-Detection/llama3-jailbreaks
+    revision: TBD
+  orbench:
+    repo: bench-llm/or-bench
+    file: or-bench-80k.csv
+    revision: TBD
+  xstest:
+    repo: Paul/XSTest
+    revision: TBD
+  harmbench:
+    repo: centerforaisafety/HarmBench
+    path: data/behavior_datasets/harmbench_behaviors_text_all.csv
+    revision: TBD

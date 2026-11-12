@@ -1,0 +1,7 @@
+weights: {misses: 5, hard_negatives: 2, ordinary: 50}
+budgets: [0.05, 0.10]            # decisions at 0.05
+pass_b: {min_F_adj: 200, min_frac: 0.25}
+bootstrap: {B: 2000, seed: 1, ci: 0.95, cluster_A1: template_id}
+handcheck: {n_F: 30, n_U: 20, n_decoys: 15, min_per_shift: 3, kill_if_mislabeled_over: 15}
+materiality_min_swap_frac: 0.10
+thresholds: {tau_llm: TBD, t0: TBD, t1: TBD, t_star: TBD, t0_10: TBD, t1_10: TBD}

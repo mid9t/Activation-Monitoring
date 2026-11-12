@@ -1,0 +1,4 @@
+policy: default_s1_s14           # may change once, on train-val only (see stage 03)
+min_two_token_mass: 0.9
+generate_check_n: 200
+threshold_rule: fit_on_tune      # reference: log_odds = 0

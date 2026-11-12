@@ -1,0 +1,33 @@
+[project]
+name = "amon"
+version = "0.1.0"
+description = "Gate 1 harness for the activation-monitoring study"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "scikit-learn",
+    "scipy",
+    "pyyaml",
+    "torch",
+    "transformers>=4.43",
+    "datasets",
+    "datasketch",
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"

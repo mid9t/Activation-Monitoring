@@ -1,0 +1,4 @@
+# Read through this file. Do not hard-code machine paths in code.
+data_root: ${AMON_DATA}
+hf_home: ${HF_HOME}
+device: ${AMON_DEVICE}
