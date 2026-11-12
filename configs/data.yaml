@@ -1,0 +1,11 @@
+seed: 20261026
+max_tokens: 2048                 # drop longer items; never truncate
+train:   {vanilla_harmful: 25000, vanilla_benign: 25000, ordinary: 25000, trainval_frac: 0.10}
+tune:    {adversarial_harmful: 40000, adversarial_benign: 40000, ordinary: 20000, domain_slice: 0}   # set 10000 only if the owner opts in
+heldout:
+  A1: {n_templates: 100, n_requests: 200, template_max_tokens: 1500}
+  A2: {exclude_splits: [harmful_prefill]}
+  B:  {orbench_n: 20000, xstest_safe: all}
+  C:  {non_english: 10000, code: 10000, exclude_languages_in_tune_slice: true}
+wildchat: {first_turn_only: true, min_tokens: 3, drop_moderation_flagged: true, max_per_neardup_cluster: 2}
+dedup:   {minhash_shingle_words: 5, minhash_perm: 128, jaccard: 0.8, embed_cosine: 0.9}

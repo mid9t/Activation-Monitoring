@@ -1,0 +1,6 @@
+layers: [8, 12, 16, 20, 24]      # L = output of block L = hidden_states[L]
+positions: [last, mean]          # mean = real tokens after <|begin_of_text|>
+dtype_store: float16
+token_budget_per_batch: 32000    # 80 GB GPU; lower on the Mac
+verify_n: 200
+verify_min_cosine: 0.999

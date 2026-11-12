@@ -1,0 +1,3 @@
+# fit on train; score train, trainval, tune only
+ensemble: {members: 20, bootstrap: grouped, seeds: [0, 19]}
+density:  {classes: [harmful, benign_wj, ordinary], dims: full, covariance: tied, shrinkage: ledoit_wolf, score: min_mahalanobis_sq, quantiles_from: trainval}

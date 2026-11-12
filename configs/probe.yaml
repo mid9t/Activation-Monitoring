@@ -1,0 +1,6 @@
+Cs: [1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3, 1.0e-2, 3.0e-2, 1.0e-1]
+layer_search_C: 1.0e-3
+cv_folds: 5
+class_weight: balanced
+tie_rule: one_se_prefer_layer16_then_smallest_C
+selected: {layer: TBD, C: TBD}
