@@ -53,7 +53,7 @@ def _is_english(code: str) -> bool:
     return _language(code) in ENGLISH
 
 
-def filter_wildchat(frame: pd.DataFrame, cfg) -> pd.DataFrame:
+def filter_wildchat(frame: pd.DataFrame, cfg, resume=None) -> pd.DataFrame:
     """First user turn, drop moderation flags, then cap near-duplicate clusters."""
     wildchat = _cfg(cfg, "wildchat")
     out = frame.copy()
@@ -69,6 +69,8 @@ def filter_wildchat(frame: pd.DataFrame, cfg) -> pd.DataFrame:
             threshold=float(dedup["jaccard"]),
             width=int(dedup["minhash_shingle_words"]),
             seed=int(_cfg(cfg, "seed")),
+            resume=resume,
+            resume_name="wildchat_minhash",
         )
         parent = list(range(len(out)))
 
@@ -113,7 +115,36 @@ def split_trainval(train: pd.DataFrame, frac: float, seed: int) -> tuple[pd.Data
     return rest.reset_index(drop=True), trainval.reset_index(drop=True)
 
 
-def select_pools(frames: dict[str, pd.DataFrame], cfg: dict, embed_fn=None) -> tuple[pd.DataFrame, dict]:
+def _filtered_wildchat(frame: pd.DataFrame, cfg: dict, resume, wildchat_sha: str | None) -> pd.DataFrame:
+    """Near-duplicate cap for WildChat. The filtered table is reused when the inputs match."""
+    from amon.data.resume import source_hash
+
+    fingerprint = None
+    if resume is not None and wildchat_sha:
+        fingerprint = {
+            "normalized_sha": wildchat_sha,
+            "data": source_hash("configs/data.yaml"),
+            "code": source_hash("src/amon/data/build.py", "src/amon/data/dedup.py"),
+            "seed": int(cfg["seed"]),
+        }
+        cached = resume.load_frame("wildchat_filtered", fingerprint)
+        if cached is not None:
+            print(f"resume wildchat_filtered: {len(cached)} rows", flush=True)
+            return cached
+    chat = filter_wildchat(assign_groups(frame), cfg, resume=resume)
+    if resume is not None and fingerprint is not None:
+        resume.save_frame("wildchat_filtered", chat, fingerprint)
+        print(f"saved wildchat_filtered: {len(chat)} rows", flush=True)
+    return chat
+
+
+def select_pools(
+    frames: dict[str, pd.DataFrame],
+    cfg: dict,
+    embed_fn=None,
+    resume=None,
+    wildchat_sha: str | None = None,
+) -> tuple[pd.DataFrame, dict]:
     """Sample, de-duplicate, and split. `frames` holds normalized tables keyed by source."""
     rng = np.random.default_rng(int(cfg["seed"]))
     notes: dict = {"shortfalls": []}
@@ -135,7 +166,7 @@ def select_pools(frames: dict[str, pd.DataFrame], cfg: dict, embed_fn=None) -> t
     tune_h = take("adversarial_harmful", "tune", int(cfg["tune"]["adversarial_harmful"]))
     tune_b = take("adversarial_benign", "tune", int(cfg["tune"]["adversarial_benign"]))
 
-    chat = filter_wildchat(assign_groups(frames["wildchat"]), cfg)
+    chat = _filtered_wildchat(frames["wildchat"], cfg, resume, wildchat_sha)
     chat = chat.loc[~chat["is_code"].astype(bool)].copy()
     english = chat.loc[chat["lang"].map(_is_english)].copy()
     train_o = _sample(english, int(cfg["train"]["ordinary"]), rng)
@@ -237,7 +268,7 @@ def select_pools(frames: dict[str, pd.DataFrame], cfg: dict, embed_fn=None) -> t
     dedup_cfg["seed"] = int(cfg["seed"])
     if embed_fn is not None:
         dedup_cfg["embed_fn"] = embed_fn
-    items, dedup_report = dedup_across_roles(items, dedup_cfg)
+    items, dedup_report = dedup_across_roles(items, dedup_cfg, resume=resume)
     notes["dedup"] = dedup_report
     leftover = cross_role_group_ids(items)
     notes["cross_role_group_ids"] = leftover
@@ -254,17 +285,24 @@ def render_and_tokenize(items: pd.DataFrame, tok, max_tokens: int) -> tuple[pd.D
     """Render with the Llama 3 template, drop items over `max_tokens`, and check the tail ids."""
     rendered = []
     round_trip_failures = []
-    for record in items.itertuples(index=False):
-        original = getattr(record, "_rendered", "") or ""
+    # itertuples renames columns that start with "_" so `_rendered` would be invisible.
+    originals = items["_rendered"].tolist() if "_rendered" in items.columns else [""] * len(items)
+    raw_messages = items["messages"].tolist()
+    item_ids = items["item_id"].tolist()
+    for item_id, original, raw in zip(item_ids, originals, raw_messages):
+        if original is None or (isinstance(original, float) and pd.isna(original)):
+            original = ""
+        else:
+            original = str(original)
         if original:
             messages = parse_rendered_llama3(original)
             if not messages:
                 messages = [{"role": "user", "content": user_text(original) or original}]
             text = render_llama3(messages, tok)
             if text != original:
-                round_trip_failures.append(record.item_id)
+                round_trip_failures.append(item_id)
         else:
-            messages = json.loads(record.messages)
+            messages = json.loads(raw)
             text = render_llama3(messages, tok)
         rendered.append((messages, text))
 

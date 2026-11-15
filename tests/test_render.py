@@ -69,6 +69,29 @@ def test_render_then_parse_is_the_identity_including_multiturn():
         assert parsed == messages
 
 
+def test_tokenize_reads_rendered_text_when_messages_is_empty():
+    import pandas as pd
+
+    from amon.data.build import render_and_tokenize
+
+    tok = TinyLlama3Tok()
+    rendered = render_llama3([{"role": "user", "content": "already rendered"}], tok)
+    items = pd.DataFrame(
+        [
+            {
+                "item_id": "prefilled",
+                "source": "llama3_jailbreaks",
+                "messages": "",
+                "_rendered": rendered,
+            }
+        ]
+    )
+    kept, tokens, report = render_and_tokenize(items, tok, max_tokens=2048)
+    assert list(kept["item_id"]) == ["prefilled"]
+    assert int(tokens.loc[~tokens["dropped"], "token_count"].iloc[0]) >= 5
+    assert report["dropped"] == 0
+
+
 def test_every_prompt_has_one_bos_and_the_same_last_five_ids():
     tok = TinyLlama3Tok()
     conversations = [

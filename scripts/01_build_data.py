@@ -9,10 +9,21 @@ from pathlib import Path
 from amon.config import load_config, require_paths
 from amon.data import acceptance, normalize, render_and_tokenize, select_pools
 from amon.data.embed import embed_texts
+from amon.data.resume import ResumeStore, source_hash
 from amon.data.sources import download_raw, load_source
 from amon.io import write_json
 from amon.memo import write_draft
 from amon.provenance import publish_manifest, sha256_file, write_manifest
+
+SOURCES = (
+    "wildjailbreak",
+    "wildchat",
+    "jailbreak_prompts",
+    "strongreject",
+    "llama3_jailbreaks",
+    "orbench",
+    "xstest",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,26 +32,8 @@ def main(argv: list[str] | None = None) -> int:
     data_cfg = load_config("data.yaml")
     models = load_config("models.yaml")
     root = paths.data_root
-    frames = {}
-    for name in (
-        "wildjailbreak",
-        "wildchat",
-        "jailbreak_prompts",
-        "strongreject",
-        "llama3_jailbreaks",
-        "orbench",
-        "xstest",
-    ):
-        spec = _spec(models, name)
-        revision = spec["revision"]
-        download_raw(name, spec["repo"], revision, root / "raw" / name / revision)
-        raw = load_source(name, models)
-        frames[name] = normalize(name, raw)
-        print(f"{name}: {len(frames[name])} normalized rows")
-    def embed_fn(texts):
-        return embed_texts(texts, models["dedup"]["repo"], models["dedup"]["revision"])
-
-    items, notes = select_pools(frames, data_cfg, embed_fn=embed_fn)
+    resume = ResumeStore(root)
+    items, notes = _items(root, data_cfg, models, resume)
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(
@@ -86,6 +79,65 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _items(root, data_cfg: dict, models: dict, resume: ResumeStore):
+    """Normalized sources and the selected item table, reloaded when a checkpoint matches."""
+    code_norm = source_hash("src/amon/data/normalize.py", "src/amon/data/sources.py")
+    frames = {}
+    for name in SOURCES:
+        spec = _spec(models, name)
+        revision = spec["revision"]
+        fingerprint = {"name": name, "revision": revision, "code": code_norm}
+        cached = resume.load_frame(f"normalized_{name}", fingerprint)
+        if cached is not None:
+            frames[name] = cached
+            print(f"resume {name}: {len(cached)} normalized rows", flush=True)
+            continue
+        download_raw(name, spec["repo"], revision, root / "raw" / name / revision)
+        frames[name] = normalize(name, load_source(name, models))
+        resume.save_frame(f"normalized_{name}", frames[name], fingerprint)
+        print(f"{name}: {len(frames[name])} normalized rows", flush=True)
+
+    embed_key = f"{models['dedup']['repo']}@{models['dedup']['revision']}"
+    selected_fp = {
+        "sources": {name: resume.frame_sha(f"normalized_{name}") for name in SOURCES},
+        "data": source_hash("configs/data.yaml"),
+        "code": source_hash(
+            "src/amon/data/build.py",
+            "src/amon/data/dedup.py",
+            "src/amon/data/groups.py",
+            "src/amon/data/templates.py",
+            "src/amon/data/embed.py",
+            "src/amon/data/normalize.py",
+        ),
+        "embed_key": embed_key,
+    }
+    selected = resume.load_selected(selected_fp)
+    if selected is not None:
+        items, notes = selected
+        print(f"resume selected items: {len(items)}", flush=True)
+        return items, notes
+
+    def embed_fn(texts):
+        return embed_texts(
+            texts,
+            models["dedup"]["repo"],
+            models["dedup"]["revision"],
+            resume=resume,
+            resume_name="dedup_embed",
+        )
+
+    items, notes = select_pools(
+        frames,
+        data_cfg,
+        embed_fn=embed_fn,
+        resume=resume,
+        wildchat_sha=resume.frame_sha("normalized_wildchat"),
+    )
+    resume.save_selected(items, notes, selected_fp)
+    print(f"saved selected items: {len(items)}", flush=True)
+    return items, notes
 
 
 def _spec(models: dict, name: str) -> dict:

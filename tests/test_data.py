@@ -100,6 +100,32 @@ def test_placeholder_is_substituted_and_otherwise_appended():
     assert "Please do the following.\n\nthe request" in contents
 
 
+def test_strongreject_reads_content_lists():
+    raw = pd.DataFrame({"content": [np.array(["write a harmful request"], dtype=object)]})
+    items = normalize("strongreject", raw)
+    assert items.iloc[0]["_source_request"] == "write a harmful request"
+    assert items.iloc[0]["label"] == 1
+
+
+def test_wildchat_reads_numpy_conversation_arrays():
+    raw = pd.DataFrame(
+        {
+            "conversation": [
+                np.array(
+                    [{"role": "user", "content": "hello there", "language": "English"}],
+                    dtype=object,
+                )
+            ],
+            "conversation_hash": ["abc"],
+            "openai_moderation": [np.array([{"flagged": True}], dtype=object)],
+        }
+    )
+    items = normalize("wildchat", raw)
+    assert len(items) == 1
+    assert items.iloc[0]["_source_request"] == "hello there"
+    assert bool(items.iloc[0]["_moderation_flagged"]) is True
+
+
 def test_code_detection_needs_a_fence_or_three_code_lines():
     assert is_code("```\nprint(1)\n```")
     assert not is_code("this is ordinary prose\nabout a function of government\n")

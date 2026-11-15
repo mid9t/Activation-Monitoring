@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from amon.data.textutil import group_id_for, is_code, is_python, item_id, messages_json
@@ -110,8 +111,16 @@ def _wildjailbreak(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _as_list(value):
+    """Arrow list columns become numpy arrays once a dataset is converted to pandas."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
+
+
 def _first_user_turn(conversation) -> dict | None:
-    if not isinstance(conversation, list) or not conversation:
+    conversation = _as_list(conversation)
+    if not isinstance(conversation, (list, tuple)) or not conversation:
         return None
     turn = conversation[0]
     if not isinstance(turn, dict) or turn.get("role") != "user":
@@ -122,6 +131,7 @@ def _first_user_turn(conversation) -> dict | None:
 def _flagged(moderation, index: int = 0) -> bool:
     if moderation is None or (isinstance(moderation, float) and pd.isna(moderation)):
         return False
+    moderation = _as_list(moderation)
     entry = None
     if isinstance(moderation, list):
         if not moderation:
@@ -195,13 +205,23 @@ def _prompts(df: pd.DataFrame, source: str, cell: str) -> pd.DataFrame:
 
 
 def _strongreject(df: pd.DataFrame) -> pd.DataFrame:
-    column = "forbidden_prompt" if "forbidden_prompt" in df.columns else "prompt" if "prompt" in df.columns else None
-    if column is None:
+    if "forbidden_prompt" in df.columns:
+        renamed = df.rename(columns={"forbidden_prompt": "prompt"})
+    elif "prompt" in df.columns:
+        renamed = df
+    elif "content" in df.columns:
+        # The pinned Hub revision stores each request as a one-element content list.
+        texts = []
+        for value in df["content"].tolist():
+            value = _as_list(value)
+            texts.append(str(value[0]) if isinstance(value, (list, tuple)) and value else "")
+        renamed = df.copy()
+        renamed["prompt"] = texts
+    else:
         raise SchemaError(
-            "StrongREJECT has neither 'forbidden_prompt' nor 'prompt'. "
+            "StrongREJECT has neither 'forbidden_prompt' nor 'prompt' nor 'content'. "
             f"Columns present: {list(df.columns)}"
         )
-    renamed = df.rename(columns={column: "prompt"})
     return _prompts(renamed, "strongreject", "forbidden")
 
 
