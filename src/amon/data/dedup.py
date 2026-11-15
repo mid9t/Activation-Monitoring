@@ -44,32 +44,119 @@ def _shingles(text: str, width: int) -> list[str]:
     return [" ".join(words[i : i + width]) for i in range(len(words) - width + 1)]
 
 
-def minhash_pairs(texts: list[str], num_perm: int, threshold: float, width: int, seed: int) -> list[tuple[int, int]]:
-    """Pairs whose estimated Jaccard index is at least `threshold`."""
+def minhash_pairs(
+    texts: list[str],
+    num_perm: int,
+    threshold: float,
+    width: int,
+    seed: int,
+    resume=None,
+    resume_name: str = "minhash",
+) -> list[tuple[int, int]]:
+    """Pairs whose estimated Jaccard index is at least `threshold`.
+
+    One permutation is shared by every text. Building a new MinHash per row
+    spends its time constructing a numpy random generator and keeps every
+    sketch alive, which exhausts memory on the full WildChat pool.
+    With a resume store, signatures are flushed every 10,000 rows.
+    """
     from datasketch import MinHash, MinHashLSH
 
-    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
-    hashes = []
+    from amon.data.resume import fingerprint_texts, source_hash
+
+    if not texts:
+        return []
+    groups: dict[str, list[int]] = defaultdict(list)
     for index, text in enumerate(texts):
-        sketch = MinHash(num_perm=num_perm, seed=seed)
-        for shingle in _shingles(text, width):
-            sketch.update(shingle.encode())
-        hashes.append(sketch)
-        lsh.insert(str(index), sketch)
-    pairs = []
-    seen = set()
-    for index, sketch in enumerate(hashes):
-        for other in lsh.query(sketch):
-            other_index = int(other)
-            if other_index <= index:
+        groups[text].append(index)
+    unique = list(groups)
+    sketch = MinHash(num_perm=num_perm, seed=seed)
+    blank = sketch.hashvalues.copy()
+    fingerprint = {
+        "texts": fingerprint_texts(unique),
+        "num_perm": num_perm,
+        "width": width,
+        "seed": seed,
+        "code": source_hash("src/amon/data/dedup.py"),
+    }
+    if resume is None:
+        signatures = np.empty((len(unique), num_perm), dtype=blank.dtype)
+        start = 0
+    else:
+        signatures, start = resume.open_matrix(
+            resume_name, fingerprint, (len(unique), num_perm), blank.dtype
+        )
+        if start:
+            print(f"resume {resume_name} at {start}/{len(unique)}", flush=True)
+    for index in range(start, len(unique)):
+        sketch.hashvalues = blank.copy()
+        sketch.update_batch(shingle.encode() for shingle in _shingles(unique[index], width))
+        signatures[index] = sketch.hashvalues
+        if resume is not None and index % 10000 == 0:
+            signatures.flush()
+            resume.mark_progress(resume_name, index + 1)
+        if index and index % 50000 == 0:
+            print(f"minhash {index}/{len(unique)}", flush=True)
+    if resume is not None and len(unique):
+        signatures.flush()
+        resume.mark_progress(resume_name, len(unique))
+    print(f"minhash {len(unique)}/{len(unique)}", flush=True)
+
+    index = MinHashLSH(threshold=threshold, num_perm=num_perm)
+    bands, rows = index.b, index.r
+    heads = [groups[text][0] for text in unique]
+    pairs: set[tuple[int, int]] = set()
+    for members in groups.values():
+        head = members[0]
+        for other in members[1:]:
+            pairs.add((head, other) if head < other else (other, head))
+    for left, right in _band_pairs(signatures, bands, rows, threshold):
+        first, second = heads[left], heads[right]
+        pairs.add((first, second) if first < second else (second, first))
+    return list(pairs)
+
+
+def _band_pairs(signatures: np.ndarray, bands: int, rows: int, threshold: float) -> list[tuple[int, int]]:
+    """Candidate pairs that share a band, confirmed against the Jaccard estimate."""
+    found: set[tuple[int, int]] = set()
+    for band in range(bands):
+        block = np.ascontiguousarray(signatures[:, band * rows : (band + 1) * rows])
+        if block.shape[1] == 0:
+            continue
+        keys = block.view(np.dtype((np.void, block.shape[1] * block.dtype.itemsize))).ravel()
+        order = np.argsort(keys, kind="mergesort")
+        sorted_keys = keys[order]
+        change = np.flatnonzero(sorted_keys[1:] != sorted_keys[:-1]) + 1
+        starts = np.concatenate(([0], change))
+        ends = np.concatenate((change, [len(sorted_keys)]))
+        for start, end in zip(starts, ends):
+            if end - start < 2:
                 continue
-            key = (index, other_index)
-            if key in seen:
-                continue
-            seen.add(key)
-            if sketch.jaccard(hashes[other_index]) >= threshold:
-                pairs.append(key)
-    return pairs
+            for left, right in _confirm_bucket(order[start:end], signatures, threshold):
+                found.add((left, right) if left < right else (right, left))
+    return list(found)
+
+
+def _confirm_bucket(members: np.ndarray, signatures: np.ndarray, threshold: float) -> list[tuple[int, int]]:
+    """Pairs inside one band whose signature agreement reaches `threshold`."""
+    if len(members) > 2500:
+        pivot = int(members[0])
+        scores = (signatures[members] == signatures[pivot]).mean(axis=1)
+        close = members[scores >= threshold]
+        rest = members[scores < threshold]
+        found = [(pivot, int(other)) for other in close[1:]]
+        if len(rest) > 1:
+            found.extend(_confirm_bucket(rest, signatures, threshold))
+        return found
+    found = []
+    block = signatures[members]
+    for start in range(len(members)):
+        scores = (block[start + 1 :] == block[start]).mean(axis=1)
+        for offset in np.flatnonzero(scores >= threshold):
+            left = int(members[start])
+            right = int(members[start + 1 + offset])
+            found.append((left, right))
+    return found
 
 
 def embedding_pairs(vectors: np.ndarray, threshold: float) -> list[tuple[int, int]]:
@@ -115,7 +202,7 @@ def _cosine_lsh_pairs(unit: np.ndarray, threshold: float) -> list[tuple[int, int
     return list(pairs)
 
 
-def dedup_across_roles(items: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
+def dedup_across_roles(items: pd.DataFrame, cfg, resume=None) -> tuple[pd.DataFrame, dict]:
     """Drop cross-role near-duplicates and merge each cluster into one group_id.
 
     Same-role copies are kept. Their group ids are merged so grouped CV cannot split them.
@@ -132,7 +219,15 @@ def dedup_across_roles(items: pd.DataFrame, cfg) -> tuple[pd.DataFrame, dict]:
     seed = int(getattr(cfg, "seed", None) or cfg.get("seed", 1) if isinstance(cfg, dict) else getattr(cfg, "seed", 1))
     embed_fn = cfg["embed_fn"] if isinstance(cfg, dict) and "embed_fn" in cfg else getattr(cfg, "embed_fn", None)
 
-    copy_pairs = minhash_pairs(texts, num_perm, jaccard, width, seed)
+    copy_pairs = minhash_pairs(
+        texts,
+        num_perm,
+        jaccard,
+        width,
+        seed,
+        resume=resume,
+        resume_name="dedup_minhash",
+    )
     if embed_fn is None:
         embed_pairs: list[tuple[int, int]] = []
     else:

@@ -84,13 +84,20 @@ def _load_hf(repo: str, revision: str, token: str | None, config: str | None = N
     kwargs = {"path": repo, "revision": revision, "token": token}
     if config:
         kwargs["name"] = config
-    dataset = load_dataset(**kwargs)
+    # An empty sibling split (StrongREJECT's train files) makes load_dataset fail
+    # before the requested split can be selected. Ask for that split directly.
     if split:
-        if split not in dataset:
+        kwargs["split"] = split
+    try:
+        dataset = load_dataset(**kwargs)
+    except ValueError as exc:
+        if split:
             raise AccessError(
-                f"{repo} has no split {split!r}. Splits present: {list(dataset.keys())}. Stopping rather than substituting."
-            )
-        return dataset[split].to_pandas()
+                f"{repo} split {split!r} could not be loaded. Stopping rather than substituting. {exc}"
+            ) from exc
+        raise
+    if split:
+        return dataset.to_pandas()
     if hasattr(dataset, "to_pandas"):
         return dataset.to_pandas()
     frames = [dataset[name].to_pandas() for name in dataset.keys()]

@@ -2,39 +2,39 @@
 # Load every model with revision=<sha>. Do not change a SHA once it is written.
 monitored:
   repo: meta-llama/Meta-Llama-3-8B-Instruct
-  revision: TBD
+  revision: 8afb486c1db24fe5011ec46dfbe5b5dccdb575c2
   dtype: {cuda: bfloat16, mps: float16, cpu: float32}
 guard:
   repo: meta-llama/Llama-Guard-3-8B
-  revision: TBD
+  revision: 7327bd9f6efbbe6101dc6cc4736302b3cbb6e425
 dedup:
   repo: sentence-transformers/all-MiniLM-L6-v2
-  revision: TBD
+  revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
 datasets:
   wildjailbreak:
     repo: allenai/wildjailbreak
-    revision: TBD
+    revision: 5ddc12a7894f842b0619b8e1c7ee496b198af009
   wildchat:
     repo: allenai/WildChat-1M
-    revision: TBD
+    revision: 7d6490e462285cf85d91eabea0f9a954fbddcd1f
   jailbreak_prompts:
     repo: TrustAIRLab/in-the-wild-jailbreak-prompts
     config: jailbreak_2023_12_25
-    revision: TBD
+    revision: a10aab8eff1c73165a442d4464dce192bd28b9c5
   strongreject:
     repo: AlignmentResearch/StrongREJECT
     split: validation
-    revision: TBD
+    revision: 9f4b3397bda985e1ac6dadb655e9ca3a17974144
   llama3_jailbreaks:
     repo: Mechanistic-Anomaly-Detection/llama3-jailbreaks
-    revision: TBD
+    revision: 89556df632374b41785bec0dfbd9cdce51e634c8
   orbench:
     repo: bench-llm/or-bench
     file: or-bench-80k.csv
-    revision: TBD
+    revision: e36d8b80e81837c8a8f264bbb2a49f1b32c7e272
   xstest:
     repo: Paul/XSTest
-    revision: TBD
+    revision: f600c994b256f12867dfa5b3eb3d545a3e62f8b5
   harmbench:
     repo: centerforaisafety/HarmBench
     path: data/behavior_datasets/harmbench_behaviors_text_all.csv
