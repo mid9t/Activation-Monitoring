@@ -24,6 +24,13 @@ def test_decide_script_refuses_dirty_manifest(tmp_path, monkeypatch):
         gate1_decide.main(["--manifest", str(manifest), "--check-only"])
 
 
+def test_decide_script_refuses_smoke_manifest(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"git": {"dirty": False, "commit": "abc"}, "smoke": True}) + "\n")
+    with pytest.raises(SystemExit):
+        gate1_decide.main(["--manifest", str(manifest), "--check-only"])
+
+
 def test_decide_script_refuses_prereg_that_differs_from_the_tag(tmp_path, monkeypatch):
     _git(tmp_path, "init")
     _git(tmp_path, "config", "user.email", "test@example.com")

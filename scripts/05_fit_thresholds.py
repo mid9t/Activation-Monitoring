@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -18,6 +21,7 @@ from amon.provenance import publish_manifest, sha256_file, write_manifest
 def main(argv: list[str] | None = None) -> int:
     argparse.ArgumentParser(description="Fit Gate 1 thresholds on the tune pool.").parse_args(argv)
     paths = require_paths()
+    _require_one_policy(paths)
     gate = load_config("gate1.yaml")
     if gate["thresholds"]["tau_llm"] != "TBD":
         raise SystemExit("thresholds are already written. Stage 05 does not rerun after they are frozen.")
@@ -56,6 +60,36 @@ def main(argv: list[str] | None = None) -> int:
     if abs(realized - 0.05) > max(1.0 / len(z), 1e-6) or not check["match"]:
         raise SystemExit(f"threshold acceptance failed: deferral={realized}, check={check}")
     return 0
+
+
+SCORED_ROLES = ["trainval", "tune", "heldout_A1", "heldout_A2", "heldout_B", "heldout_C", "pipeline"]
+
+
+def _require_one_policy(paths) -> None:
+    """Every scored role must share one policy hash. Train is not scored at Gate 1."""
+    from amon.guard import repo_root
+
+    directories = []
+    if os.environ.get("AMON_MANIFESTS_DIR"):
+        directories.append(Path(os.environ["AMON_MANIFESTS_DIR"]))
+    directories.append(repo_root() / "manifests")
+    directories.append(paths.data_root / "manifests")
+    files = None
+    for directory in directories:
+        found = [directory / f"03_llm_{role}.json" for role in SCORED_ROLES]
+        if all(path.is_file() for path in found):
+            files = sorted(directory.glob("03_llm_*.json"))
+            break
+    if not files:
+        raise SystemExit("stage 05 needs 03_llm_*.json for every scored role, and they must share one policy_sha256")
+    hashes = []
+    for path in files:
+        data = json.loads(path.read_text())
+        if data.get("smoke"):
+            raise SystemExit(f"{path.name} is a smoke manifest")
+        hashes.append(data.get("policy_sha256"))
+    if any(value is None for value in hashes) or len(set(hashes)) != 1:
+        raise SystemExit("Llama Guard roles do not share one policy_sha256")
 
 
 def _subsample_check(z, llm, y, costs, budget: float) -> dict:

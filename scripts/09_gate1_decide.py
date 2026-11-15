@@ -9,7 +9,7 @@ from pathlib import Path
 from amon.decide import decide
 from amon.io import read_json, write_json
 from amon.llm import Policy, swap_classifier_messages
-from amon.provenance import DirtyTreeError, PreregError, prereg_matches_tag, refuse_dirty_inputs
+from amon.provenance import DirtyTreeError, PreregError, SmokeManifestError, prereg_matches_tag, refuse_dirty_inputs, refuse_smoke_inputs
 
 
 def repo_root() -> Path:
@@ -34,8 +34,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(str(exc)) from exc
     if args.manifest:
         try:
-            refuse_dirty_inputs([Path(path) for path in args.manifest])
-        except DirtyTreeError as exc:
+            manifests = [Path(path) for path in args.manifest]
+            refuse_dirty_inputs(manifests)
+            refuse_smoke_inputs(manifests)
+        except (DirtyTreeError, SmokeManifestError) as exc:
             raise SystemExit(str(exc)) from exc
     if args.check_only or args.check_prereg:
         return 0

@@ -68,10 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     rubric = Path("prereg/rubric.md")
     rubric_sha = sha256_file(rubric) if rubric.is_file() else None
     write_draft(Path("prereg/gate1_memo.md"), hashes, int(data_cfg["seed"]), rubric_sha)
+    outputs = [processed / "items.parquet", *sorted(splits.glob("*.ids"))]
     manifest = write_manifest(
         processed,
         list((root / "raw").rglob("sha256.txt")),
         {"seed": data_cfg["seed"], "dtype": None, "device": paths.device, "model_sha": models["monitored"]["revision"]},
+        outputs=outputs,
     )
     publish_manifest(manifest, "01_build_data.json")
     print(verdict)

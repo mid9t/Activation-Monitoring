@@ -1,4 +1,6 @@
 policy: default_s1_s14           # may change once, on train-val only (see stage 03)
+extra_category: null             # or "S15: <name>.\n<one-paragraph description>"
+policy_decided: false            # set true in the same commit as extra_category
 min_two_token_mass: 0.9
 generate_check_n: 200
 threshold_rule: fit_on_tune      # reference: log_odds = 0

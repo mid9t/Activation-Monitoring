@@ -62,13 +62,22 @@ class Paths:
     data_root: Path
     hf_home: Path
     device: str
+    out_root: Path
 
     @classmethod
     def load(cls) -> "Paths":
         raw = load_config("paths.yaml")
         hf_home = raw.get("hf_home") or str(Path(raw["data_root"]) / "hf")
         device = raw.get("device") or os.environ.get("AMON_DEVICE", "cpu")
-        return cls(data_root=Path(raw["data_root"]), hf_home=Path(hf_home), device=device)
+        # $AMON_OUT receives stage outputs. Unset, outputs use the data root.
+        # A smoke run points it at its own folder, which must sit under $AMON_DATA.
+        out_root = os.environ.get("AMON_OUT") or raw["data_root"]
+        return cls(
+            data_root=Path(raw["data_root"]),
+            hf_home=Path(hf_home),
+            device=device,
+            out_root=Path(out_root),
+        )
 
 
 def require_paths() -> Paths:

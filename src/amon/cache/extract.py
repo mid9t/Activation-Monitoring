@@ -1,8 +1,10 @@
-"""One forward pass per item. Left padding, explicit positions, resumable memmaps."""
+"""One forward pass per item. Left padding, explicit positions, shard checkpoints."""
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -80,25 +82,150 @@ def forward_hidden(model, input_ids, attention_mask, layers: list[int]) -> dict[
     return result
 
 
+# Float16 saturates at 65,504. Massive activations sit at BOS, which is not stored.
+# A peak this close to the limit is a bug, so the run stops instead of rewriting the file.
+FLOAT16_PEAK = 60000
+SHARD_ROWS = 2000
+
+
 def _to_storage(values, dtype_store: str):
-    """Cast to the storage dtype. Non-finite values stop the run. Overflow stores float32."""
+    """Cast to the storage dtype. Non-finite values and float16 overflow stop the run."""
     import torch
 
     values = values.detach().float().cpu()
     if not torch.isfinite(values).all():
         raise RuntimeError("non-finite activation; refusing to store the cache")
-    if dtype_store == "float16" and torch.max(values.abs()) >= 65504:
-        return values.numpy().astype(np.float32), "float32"
+    peak = float(values.abs().max()) if values.numel() else 0.0
+    if dtype_store == "float16" and peak >= FLOAT16_PEAK:
+        raise RuntimeError(f"peak {peak:.0f} near the float16 limit; set dtype_store: float32")
     if dtype_store == "float16":
-        return values.numpy().astype(np.float16), "float16"
-    return values.numpy().astype(np.float32), "float32"
+        return values.numpy().astype(np.float16), peak
+    return values.numpy().astype(np.float32), peak
 
 
-def cache_split(split: str, model, tok, cfg, out_dir: Path) -> Path:
-    """Write last_L*.npy, mean_L*.npy, meta.parquet, and manifest.json. Resumable.
+def _scratch_for(split: str, cfg) -> Path:
+    custom = getattr(cfg, "scratch_dir", None)
+    if custom:
+        return Path(custom)
+    return Path(os.environ.get("AMON_CACHE_TMP", "/tmp")) / "cache" / split
 
-    Items and their id order come from cfg.items (a dataframe) or, if absent,
-    from cfg.data_root / processed. Rows are written in .ids order.
+
+def _iter_shards(shard_dir: Path) -> list[Path]:
+    if not shard_dir.is_dir():
+        return []
+    found = []
+    for path in shard_dir.iterdir():
+        if path.is_file() and path.name.startswith("part-") and path.suffix == ".npz" and ".tmp" not in path.name:
+            found.append(path)
+    return sorted(found)
+
+
+def _next_serial(shards: list[Path]) -> int:
+    serials = [int(path.stem.split("-")[1]) for path in shards]
+    return max(serials) + 1 if serials else 0
+
+
+def _read_ids(out_dir: Path) -> list[str]:
+    return [line.strip() for line in (out_dir / "split.ids").read_text().splitlines() if line.strip()]
+
+
+def _finals_complete(out_dir: Path, layers: list[int], n: int, hidden: int, np_dtype) -> bool:
+    if not (out_dir / "meta.parquet").is_file() or not (out_dir / "split.ids").is_file():
+        return False
+    for layer in layers:
+        for position in ("last", "mean"):
+            path = out_dir / f"{position}_{layer_name(layer)}.npy"
+            if not path.is_file():
+                return False
+            array = np.load(path, mmap_mode="r")
+            if array.shape != (n, hidden) or array.dtype != np_dtype:
+                return False
+    return True
+
+
+def _clear_partial(out_dir: Path) -> None:
+    for path in out_dir.glob("*.npy"):
+        path.unlink()
+    meta = out_dir / "meta.parquet"
+    if meta.exists():
+        meta.unlink()
+    peaks = out_dir / "peaks.json"
+    if peaks.exists():
+        peaks.unlink()
+    shutil.rmtree(out_dir / "shards", ignore_errors=True)
+
+
+def _open_memmaps(directory: Path, layers: list[int], n: int, hidden: int, np_dtype) -> dict:
+    if directory.exists():
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True)
+    stores = {}
+    for layer in layers:
+        for position in ("last", "mean"):
+            path = directory / f"{position}_{layer_name(layer)}.npy"
+            stores[(position, layer)] = np.lib.format.open_memmap(
+                path, mode="w+", dtype=np_dtype, shape=(n, hidden)
+            )
+    return stores
+
+
+def _apply_shards(stores, shard_dir: Path, layers: list[int]) -> tuple[set[int], dict]:
+    done: set[int] = set()
+    peaks: dict[tuple[str, int], float] = {}
+    for path in _iter_shards(shard_dir):
+        with np.load(path) as data:
+            indices = np.asarray(data["indices"], dtype=np.int64)
+            for key in data.files:
+                if key == "indices" or key.startswith("peak__"):
+                    continue
+                position, layer_text = key.split("_L")
+                layer = int(layer_text)
+                stores[(position, layer)][indices] = np.asarray(data[key])
+            for layer in layers:
+                for position in ("last", "mean"):
+                    peak_key = f"peak__{position}_{layer_name(layer)}"
+                    if peak_key in data.files:
+                        peaks[(position, layer)] = max(peaks.get((position, layer), 0.0), float(data[peak_key]))
+            done.update(int(index) for index in indices)
+    return done, peaks
+
+
+def _write_shard(shard_dir: Path, serial: int, indices: list[int], chunks: dict, peaks: dict) -> None:
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    final = shard_dir / f"part-{serial:06d}.npz"
+    tmp = shard_dir / f".part-{serial:06d}.tmp"
+    payload = {"indices": np.asarray(indices, dtype=np.int64)}
+    payload.update(chunks)
+    for (position, layer), peak in peaks.items():
+        payload[f"peak__{position}_{layer_name(layer)}"] = np.float64(peak)
+    with tmp.open("wb") as handle:
+        np.savez(handle, **payload)
+    os.replace(tmp, final)
+
+
+def _peaks_payload(peaks: dict) -> dict:
+    payload: dict[str, dict[str, float]] = {}
+    for (position, layer), peak in peaks.items():
+        payload.setdefault(layer_name(layer), {})[position] = float(peak)
+    return payload
+
+
+def _load_peaks(out_dir: Path) -> dict:
+    path = out_dir / "peaks.json"
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text())
+
+
+def cache_split(split: str, model, tok, cfg, out_dir: Path) -> dict:
+    """Write last_L*.npy and mean_L*.npy. Checkpoints are immutable shards.
+
+    Local memmaps live on the container scratch disk. Every shard_rows rows, an
+    npz of those row ids and arrays is renamed into place on `out_dir`. A
+    preemption loses at most the open shard. The manifest is written by stage 02
+    after verify_cache passes.
+
+    Items and their id order come from cfg.items, or from cfg.data_root / processed.
     """
     import pandas as pd
     import torch
@@ -107,95 +234,117 @@ def cache_split(split: str, model, tok, cfg, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     items = _items_for_split(split, cfg)
     ids = items["item_id"].astype(str).tolist()
+    layers = [int(layer) for layer in cfg.layers]
+    hidden = int(model.config.hidden_size)
+    dtype_store = str(cfg.dtype_store)
+    np_dtype = np.float16 if dtype_store == "float16" else np.float32
+    shard_dir = out_dir / "shards"
+    if (out_dir / "split.ids").is_file() and _read_ids(out_dir) != ids:
+        _clear_partial(out_dir)
+    if (
+        (out_dir / "split.ids").is_file()
+        and _read_ids(out_dir) == ids
+        and not _iter_shards(shard_dir)
+        and _finals_complete(out_dir, layers, len(ids), hidden, np_dtype)
+    ):
+        return {"complete": True, "peaks": _load_peaks(out_dir), "out_dir": out_dir, "scratch": None}
+
     (out_dir / "split.ids").write_text("".join(f"{item}\n" for item in ids))
     sequences = []
     for messages in items["messages"].tolist():
         parsed = json.loads(messages) if isinstance(messages, str) else messages
         sequences.append(tokenize_rendered(render_llama3(parsed, tok), tok))
     lengths = [len(seq) for seq in sequences]
-    layers = [int(layer) for layer in cfg.layers]
-    hidden = int(model.config.hidden_size)
-    dtype_store = str(cfg.dtype_store)
-    np_dtype = np.float16 if dtype_store == "float16" else np.float32
-    stores = {}
-    overflow = {}
-    for layer in layers:
-        for position in ("last", "mean"):
-            path = out_dir / f"{position}_{layer_name(layer)}.npy"
-            if path.exists():
-                stores[(position, layer)] = np.load(path, mmap_mode="r+")
-            else:
-                stores[(position, layer)] = np.lib.format.open_memmap(
-                    path, mode="w+", dtype=np_dtype, shape=(len(ids), hidden)
-                )
-    progress_path = out_dir / "rows_done.json"
-    done = set(json.loads(progress_path.read_text())) if progress_path.exists() else set()
+    scratch = _scratch_for(split, cfg)
+    stores = _open_memmaps(scratch, layers, len(ids), hidden, np_dtype)
+    done, peaks = _apply_shards(stores, shard_dir, layers)
     pad_id = int(getattr(tok, "pad_token_id", None) or 0)
     device = next(model.parameters()).device
     model.eval()
     batches = pack_batches(lengths, int(cfg.token_budget_per_batch))
-    norms = {layer: np.zeros(len(ids), dtype=np.float32) for layer in layers}
-    if (out_dir / "meta.parquet").exists() and done:
-        previous = pd.read_parquet(out_dir / "meta.parquet")
+    shard_rows = int(getattr(cfg, "shard_rows", SHARD_ROWS))
+    stop_after = getattr(cfg, "stop_after_batches", None)
+    serial = _next_serial(_iter_shards(shard_dir))
+    buffer_idx: list[int] = []
+    buffer = {(position, layer): [] for layer in layers for position in ("last", "mean")}
+
+    def flush() -> None:
+        nonlocal serial
+        if not buffer_idx:
+            return
+        chunks = {}
         for layer in layers:
-            column = f"norm_{layer_name(layer)}"
-            if column in previous.columns:
-                norms[layer][:] = previous[column].to_numpy()
+            for position in ("last", "mean"):
+                rows = buffer[(position, layer)]
+                chunks[f"{position}_{layer_name(layer)}"] = np.stack(rows, axis=0)
+                buffer[(position, layer)] = []
+        _write_shard(shard_dir, serial, list(buffer_idx), chunks, peaks)
+        buffer_idx.clear()
+        serial += 1
+
+    computed = 0
     with torch.inference_mode():
         for batch in batches:
             pending = [index for index in batch if index not in done]
             if not pending:
                 continue
             ids_tensor, mask = left_pad([sequences[index] for index in pending], pad_id)
-            ids_tensor = ids_tensor.to(device)
-            mask = mask.to(device)
-            hidden_states = forward_hidden(model, ids_tensor, mask, layers)
+            hidden_states = forward_hidden(model, ids_tensor.to(device), mask.to(device), layers)
+            stored = {}
+            batch_peaks = {}
             for layer, (last, mean) in hidden_states.items():
-                last_np, last_dtype = _to_storage(last, dtype_store)
-                mean_np, mean_dtype = _to_storage(mean, dtype_store)
-                overflow[layer_name(layer)] = last_dtype
-                stores[("last", layer)] = _store_as(
-                    stores[("last", layer)], last_dtype, out_dir, "last", layer, len(ids), hidden
-                )
-                stores[("mean", layer)] = _store_as(
-                    stores[("mean", layer)], mean_dtype, out_dir, "mean", layer, len(ids), hidden
-                )
-                stores[("last", layer)][pending] = last_np
-                stores[("mean", layer)][pending] = mean_np
-                norms[layer][pending] = np.linalg.norm(last_np.astype(np.float32), axis=1)
+                last_np, last_peak = _to_storage(last, dtype_store)
+                mean_np, mean_peak = _to_storage(mean, dtype_store)
+                stored[("last", layer)] = last_np
+                stored[("mean", layer)] = mean_np
+                batch_peaks[("last", layer)] = last_peak
+                batch_peaks[("mean", layer)] = mean_peak
+            for key, array in stored.items():
+                stores[key][list(pending)] = array
+                for row, index in enumerate(pending):
+                    buffer[key].append(np.asarray(array[row]))
+            for key, peak in batch_peaks.items():
+                peaks[key] = max(peaks.get(key, 0.0), peak)
+            buffer_idx.extend(pending)
             done.update(pending)
-            progress_path.write_text(json.dumps(sorted(done)))
-            for array in stores.values():
-                array.flush()
+            computed += 1
+            if len(buffer_idx) >= shard_rows:
+                flush()
+            if stop_after is not None and computed >= int(stop_after):
+                flush()
+                for array in stores.values():
+                    array.flush()
+                return {
+                    "complete": False,
+                    "peaks": _peaks_payload(peaks),
+                    "out_dir": out_dir,
+                    "scratch": scratch,
+                }
+    flush()
+    for key in list(stores):
+        stores.pop(key).flush()
+    for layer in layers:
+        for position in ("last", "mean"):
+            name = f"{position}_{layer_name(layer)}.npy"
+            shutil.copyfile(scratch / name, out_dir / name)
+    import gc
+
+    gc.collect()
+    norms = {}
+    copied = {}
+    for layer in layers:
+        copied[layer] = np.load(out_dir / f"last_{layer_name(layer)}.npy", mmap_mode="r")
+        norms[layer] = np.linalg.norm(np.asarray(copied[layer], dtype=np.float32), axis=1)
     meta = pd.DataFrame({"item_id": ids, "token_count": lengths})
     for layer in layers:
         meta[f"norm_{layer_name(layer)}"] = norms[layer]
     meta.to_parquet(out_dir / "meta.parquet", index=False)
-    from amon.provenance import write_manifest
-
-    manifest_cfg = {
-        "seed": getattr(cfg, "seed", None),
-        "dtype": dtype_store,
-        "device": str(device),
-        "model_sha": getattr(cfg, "model_sha", None),
-        "layers": layers,
-        "overflow_dtype": overflow,
-        "split": split,
-    }
-    inputs = [Path(path) for path in getattr(cfg, "inputs", [])]
-    write_manifest(out_dir, inputs, manifest_cfg)
-    return out_dir
-
-
-def _store_as(array, dtype_name: str, out_dir: Path, position: str, layer: int, n: int, hidden: int):
-    """Return a memmap of the requested dtype, rewriting the file if float16 overflowed."""
-    wanted = np.float32 if dtype_name == "float32" else np.float16
-    if array.dtype == wanted:
-        return array
-    path = out_dir / f"{position}_{layer_name(layer)}.npy"
-    del array
-    fresh = np.lib.format.open_memmap(path, mode="w+", dtype=wanted, shape=(n, hidden))
-    return fresh
+    peak_payload = _peaks_payload(peaks)
+    (out_dir / "peaks.json").write_text(json.dumps(peak_payload, indent=2, sort_keys=True) + "\n")
+    copied.clear()
+    gc.collect()
+    shutil.rmtree(scratch, ignore_errors=True)
+    return {"complete": True, "peaks": peak_payload, "out_dir": out_dir, "scratch": None}
 
 
 def _items_for_split(split: str, cfg):
