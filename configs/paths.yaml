@@ -2,3 +2,5 @@
 data_root: ${AMON_DATA}
 hf_home: ${HF_HOME}
 device: ${AMON_DEVICE}
+# Outputs use $AMON_OUT when it is set, and data_root otherwise.
+# A smoke run sets $AMON_OUT to a folder under $AMON_DATA. Inputs always stay on data_root.

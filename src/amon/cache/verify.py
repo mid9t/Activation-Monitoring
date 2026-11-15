@@ -21,8 +21,19 @@ def _cosine(left: np.ndarray, right: np.ndarray) -> float:
     return float(np.dot(left, right) / denom)
 
 
-def verify_cache(split_dir: Path, ids: list[str], model, tok, n_check: int = 200) -> dict:
-    """Row counts, finite non-zero rows, and agreement with unpadded single-item reruns."""
+def verify_cache(
+    split_dir: Path,
+    ids: list[str],
+    model,
+    tok,
+    n_check: int = 200,
+    data_root: Path | None = None,
+) -> dict:
+    """Row counts, finite non-zero rows, and agreement with unpadded single-item reruns.
+
+    `data_root` is the processed-data root. Smoke caches live outside the usual
+    cache/ layout, so the caller passes it instead of walking up from split_dir.
+    """
     split_dir = Path(split_dir)
     meta = pd.read_parquet(split_dir / "meta.parquet")
     problems = []
@@ -43,8 +54,8 @@ def verify_cache(split_dir: Path, ids: list[str], model, tok, n_check: int = 200
             zero = np.all(array == 0, axis=1)
             if bool(np.any(zero)):
                 problems.append(f"{position} L{layer} has an all-zero row")
-    data_root = split_dir.parent.parent.parent
-    items = pd.read_parquet(data_root / "processed" / "items.parquet").set_index("item_id")
+    root = Path(data_root) if data_root is not None else split_dir.parent.parent.parent
+    items = pd.read_parquet(root / "processed" / "items.parquet").set_index("item_id")
     rng = np.random.default_rng(0)
     check_n = min(n_check, len(ids))
     chosen = rng.choice(len(ids), size=check_n, replace=False) if check_n else []

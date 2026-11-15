@@ -9,6 +9,10 @@ from pathlib import Path
 import numpy as np
 
 
+HEADER = "<|start_header_id|>assistant<|end_header_id|>"
+CATS_END = "<END UNSAFE CONTENT CATEGORIES>"
+
+
 @dataclass
 class Policy:
     name: str = "default_s1_s14"
@@ -19,20 +23,23 @@ class Policy:
 
 
 def render_guard_prompt(messages: list[dict], tok, policy: Policy) -> str:
-    """Llama Guard's own chat template. The prompt must end on the assistant header."""
+    """Llama Guard's own chat template, scored at the label rather than the newline.
+
+    The template ends on the assistant header. The model then writes a newline
+    before "safe" or "unsafe", so the scored prompt ends with that newline.
+    A custom category is inserted as S15 inside the categories block.
+    """
     text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     if not isinstance(text, str):
         raise TypeError("Llama Guard apply_chat_template must return a string")
+    if not text.rstrip().endswith(HEADER):
+        raise ValueError("Llama Guard prompt must end with the assistant header")
     if policy.extra_category:
-        marker = "<|start_header_id|>assistant<|end_header_id|>"
-        if marker not in text:
-            raise ValueError("cannot insert a category: the prompt has no assistant header")
         line = policy.extra_category.strip()
-        if line not in text:
-            text = text.replace(marker, f"{line}\n{marker}", 1)
-    if not text.rstrip().endswith("<|end_header_id|>") and "<|start_header_id|>assistant<|end_header_id|>" not in text[-80:]:
-        raise ValueError("Llama Guard prompt does not end with the assistant header")
-    return text
+        if CATS_END not in text or not line.startswith("S15:"):
+            raise ValueError("custom category must be S15 inside the categories block")
+        text = text.replace(CATS_END, f"{line}\n{CATS_END}", 1)
+    return text.rstrip() + "\n\n"
 
 
 def answer_token_ids(tok) -> tuple[int, int]:
@@ -71,8 +78,48 @@ def prompt_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def forward_guard_logits(model, input_ids, attention_mask):
+    """Last-position logits with the same explicit positions the activation cache uses."""
+    pos = (attention_mask.cumsum(-1) - 1).clamp(min=0)
+    return model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=pos,
+        logits_to_keep=1,
+        use_cache=False,
+    ).logits
+
+
+def generate_check(model, tok, prompts, item_ids, log_odds, n: int = 200, seed: int = 0) -> dict:
+    """Greedy-generate 8 tokens and require the first line to match the scored label."""
+    import torch
+
+    prompts = list(prompts)
+    item_ids = list(item_ids)
+    log_odds = np.asarray(log_odds)
+    n_items = len(prompts)
+    if n_items == 0:
+        return {"n": 0, "agreement": 0.0, "pass": False, "rows": []}
+    pick = np.random.default_rng(seed).choice(n_items, min(int(n), n_items), replace=False)
+    rows = []
+    device = model.device
+    model.eval()
+    with torch.inference_mode():
+        for index in pick:
+            index = int(index)
+            enc = tok(prompts[index], return_tensors="pt", add_special_tokens=False).to(device)
+            out = model.generate(**enc, max_new_tokens=8, do_sample=False)
+            new_tokens = out[0, enc["input_ids"].shape[1] :]
+            text = tok.decode(new_tokens, skip_special_tokens=True).strip()
+            generated = text.splitlines()[0] if text else ""
+            scored = "unsafe" if float(log_odds[index]) > 0 else "safe"
+            rows.append({"item_id": str(item_ids[index]), "generated": generated, "scored": scored})
+    agree = float(np.mean([row["generated"] == row["scored"] for row in rows]))
+    return {"n": len(rows), "agreement": agree, "pass": agree >= 0.99, "rows": rows}
+
+
 def score_guard(split: str, model, tok, policy: Policy, out_path: Path, items=None, cfg=None) -> Path:
-    """Score one split. Writes a parquet of log-odds and a manifest next to it."""
+    """Score one split. Writes a parquet of log-odds. The stage script writes the manifest."""
     import pandas as pd
     import torch
 
@@ -104,8 +151,8 @@ def score_guard(split: str, model, tok, policy: Policy, out_path: Path, items=No
     with torch.inference_mode():
         for batch in pack_batches([len(seq) for seq in sequences], budget):
             ids, mask = left_pad([sequences[index] for index in batch], pad_id)
-            logits = model(input_ids=ids.to(device), attention_mask=mask.to(device)).logits
-            # Left padding: the last position is the last real token.
+            # Left padding: explicit positions, and logits at the last real token only.
+            logits = forward_guard_logits(model, ids.to(device), mask.to(device))
             scored = scores_from_logits(logits, safe_id, unsafe_id)
             for column, dest in (
                 ("lp_safe", lp_safe),
@@ -129,21 +176,6 @@ def score_guard(split: str, model, tok, policy: Policy, out_path: Path, items=No
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(out_path, index=False)
-    from amon.provenance import write_manifest
-
-    write_manifest(
-        out_path.parent / "manifests" / split,
-        [out_path],
-        {
-            "seed": getattr(cfg, "seed", None),
-            "dtype": str(getattr(model, "dtype", "")),
-            "device": str(device),
-            "model_sha": getattr(cfg, "model_sha", None),
-            "policy": policy.identity(),
-            "policy_sha256": prompt_hash(policy.identity()),
-            "split": split,
-        },
-    )
     return out_path
 
 

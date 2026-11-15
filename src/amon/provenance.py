@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import socket
 import subprocess
@@ -32,6 +33,10 @@ class PreregError(RuntimeError):
     """prereg/ does not match the gate1-prereg tag."""
 
 
+class SmokeManifestError(RuntimeError):
+    """Stage 09 will not score a smoke run."""
+
+
 def repo_root() -> Path:
     from amon.guard import repo_root as root
 
@@ -49,14 +54,39 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def git_state(cwd: Path | None = None) -> dict:
-    """Commit and whether the working tree is dirty. Missing git is recorded, not invented."""
+    """Commit and whether the working tree is dirty. Missing git is recorded, not invented.
+
+    Modal sets AMON_GIT_COMMIT and AMON_GIT_DIRTY because the image has no .git directory.
+    Those are read first. A missing git binary is recorded; it is not treated as a clean tree.
+    """
+    if os.environ.get("AMON_GIT_COMMIT"):
+        return {
+            "commit": os.environ["AMON_GIT_COMMIT"],
+            "dirty": os.environ.get("AMON_GIT_DIRTY") == "1",
+            "error": None,
+            "source": "env",
+        }
     root = cwd or repo_root()
-    head = _git(["rev-parse", "HEAD"], root)
+    try:
+        head = _git(["rev-parse", "HEAD"], root)
+    except FileNotFoundError:
+        return {"commit": None, "dirty": None, "error": "git not installed"}
     if head.returncode != 0:
         return {"commit": None, "dirty": None, "error": head.stderr.strip()}
-    status = _git(["status", "--porcelain"], root)
+    try:
+        status = _git(["status", "--porcelain"], root)
+    except FileNotFoundError:
+        return {"commit": None, "dirty": None, "error": "git not installed"}
     dirty = bool(status.stdout.strip())
     return {"commit": head.stdout.strip(), "dirty": dirty, "error": None}
+
+
+def data_rel(path: Path) -> str:
+    """Path relative to $AMON_DATA, with forward slashes. The same key matches on the Volume and the Mac."""
+    root = os.environ.get("AMON_DATA")
+    if not root:
+        raise EnvironmentError("AMON_DATA is unset; manifests record paths relative to the data root")
+    return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
 
 
 def sha256_file(path: Path) -> str:
@@ -101,15 +131,26 @@ def _json_default(value):
     raise TypeError(f"cannot serialize {type(value).__name__}")
 
 
-def write_manifest(out_dir: Path, inputs: list[Path], cfg: dict) -> Path:
-    """Write manifest.json. Records a dirty working tree; it does not clean it."""
+_MANIFEST_FIELDS = ("policy", "policy_sha256", "prompt_hash", "split", "peaks", "layers")
+
+
+def write_manifest(out_dir: Path, inputs: list[Path], cfg: dict, outputs: list[Path] | tuple = ()) -> Path:
+    """Write manifest.json. Records a dirty working tree; it does not clean it.
+
+    Input and output keys are relative to $AMON_DATA so the same manifest matches
+    on the Volume and on the Mac. `outputs` carries a SHA-256 and a byte count.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     git = git_state()
     payload = {
         "git": git,
         "config_sha256": config_sha256(cfg),
-        "inputs": {str(path): sha256_file(path) for path in inputs if Path(path).is_file()},
+        "inputs": {data_rel(path): sha256_file(path) for path in inputs if Path(path).is_file()},
+        "outputs": {
+            data_rel(path): {"sha256": sha256_file(path), "bytes": Path(path).stat().st_size}
+            for path in outputs
+        },
         "model_sha": cfg.get("model_sha"),
         "dtype": cfg.get("dtype"),
         "device": cfg.get("device"),
@@ -118,22 +159,34 @@ def write_manifest(out_dir: Path, inputs: list[Path], cfg: dict) -> Path:
         "host": socket.gethostname(),
         "platform": platform.platform(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "smoke": bool(cfg.get("smoke", False)),
     }
+    for key in _MANIFEST_FIELDS:
+        if cfg.get(key) is not None:
+            payload[key] = cfg[key]
     path = out_dir / "manifest.json"
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n")
     return path
 
 
 def manifest_is_dirty(path: Path) -> bool:
-    data = json.loads(Path(path).read_text())
-    return bool(data.get("git", {}).get("dirty"))
+    """True when the manifest has no commit or the tree was dirty. Unknown is not clean."""
+    git = json.loads(Path(path).read_text()).get("git", {})
+    return git.get("commit") is None or git.get("dirty") is not False
 
 
 def refuse_dirty_inputs(manifests: list[Path]) -> None:
-    """09_gate1_decide refuses any input whose manifest came from a dirty tree."""
-    dirty = [str(path) for path in manifests if manifest_is_dirty(path)]
-    if dirty:
-        raise DirtyTreeError("refusing dirty manifests: " + ", ".join(dirty))
+    """09_gate1_decide refuses a dirty tree and a manifest that never recorded a commit."""
+    bad = [str(path) for path in manifests if manifest_is_dirty(path)]
+    if bad:
+        raise DirtyTreeError("refusing manifests without a clean commit: " + ", ".join(bad))
+
+
+def refuse_smoke_inputs(manifests: list[Path]) -> None:
+    """09_gate1_decide refuses a manifest produced by --limit."""
+    bad = [str(path) for path in manifests if json.loads(Path(path).read_text()).get("smoke")]
+    if bad:
+        raise SmokeManifestError("refusing smoke manifests: " + ", ".join(bad))
 
 
 def prereg_matches_tag(root: Path | None = None, tag: str = "gate1-prereg") -> None:
@@ -151,7 +204,9 @@ def prereg_matches_tag(root: Path | None = None, tag: str = "gate1-prereg") -> N
 
 
 def publish_manifest(manifest: Path, name: str, manifests_dir: Path | None = None) -> Path:
-    """Copy a manifest into the repo's manifests/ directory."""
+    """Copy a manifest into the repo's manifests/ directory, or $AMON_MANIFESTS_DIR when set."""
+    if manifests_dir is None and os.environ.get("AMON_MANIFESTS_DIR"):
+        manifests_dir = Path(os.environ["AMON_MANIFESTS_DIR"])
     dest_dir = manifests_dir or (repo_root() / "manifests")
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / name

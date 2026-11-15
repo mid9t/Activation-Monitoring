@@ -95,11 +95,15 @@ def _within_one_se(rows: list[dict]) -> list[dict]:
 def select_probe(X, y, groups, layers: list[int], Cs: list[float], cfg) -> dict:
     """Choose the layer at C = layer_search_C, then C at that layer.
 
-    X has shape (n_layers, N, D) in the same order as `layers`.
-    Within one standard error of the best: prefer layer 16, then the smallest C.
+    X has shape (n_layers, N, D), or is a sequence of one (N, D) array per layer.
+    The sequence form keeps a single layer in memory. Within one standard error
+    of the best: prefer layer 16, then the smallest C. Each fold is standardized
+    in float64.
     """
-    X = np.asarray(X)
-    if X.ndim != 3 or X.shape[0] != len(layers):
+    if isinstance(X, np.ndarray):
+        if X.ndim != 3 or X.shape[0] != len(layers):
+            raise ValueError("X must have shape (n_layers, N, D) aligned with `layers`")
+    elif len(X) != len(layers):
         raise ValueError("X must have shape (n_layers, N, D) aligned with `layers`")
     y = np.asarray(y)
     groups = np.asarray(groups)
@@ -114,9 +118,10 @@ def select_probe(X, y, groups, layers: list[int], Cs: list[float], cfg) -> dict:
     layer_candidates.sort(key=lambda row: (row["layer"] != 16, -row["mean"], row["layer"]))
     chosen_layer = int(layer_candidates[0]["layer"])
     layer_index = layers.index(chosen_layer)
+    chosen_X = X[layer_index]
     c_rows = []
     for C in Cs:
-        stats = _cv_auroc(X[layer_index], y, groups, float(C), n_folds, class_weight)
+        stats = _cv_auroc(chosen_X, y, groups, float(C), n_folds, class_weight)
         c_rows.append({"layer": chosen_layer, "C": float(C), **stats})
     c_candidates = _within_one_se(c_rows)
     c_candidates.sort(key=lambda row: (row["C"], -row["mean"]))
