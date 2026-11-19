@@ -9,3 +9,9 @@ heldout:
   C:  {non_english: 10000, code: 10000, exclude_languages_in_tune_slice: true}
 wildchat: {first_turn_only: true, min_tokens: 3, drop_moderation_flagged: true, max_per_neardup_cluster: 2}
 dedup:   {minhash_shingle_words: 5, minhash_perm: 128, jaccard: 0.8, embed_cosine: 0.9}
+ordinary_audit:
+  template_containment: 0.5
+  min_template_shingles: 20
+  exclusions: prereg/ordinary_exclusions.csv
+  audit_n_random: 200
+  audit_n_flagged: 30

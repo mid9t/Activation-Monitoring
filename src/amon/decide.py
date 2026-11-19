@@ -9,6 +9,13 @@ from amon.stats.mdd import mdd_net_items
 SHIFT_TIE_RANK = {"A": 0, "C": 1, "B": 2}
 
 
+def label_outcome(outcome: str, confounded: bool) -> str:
+    """A confounded Positive or Conditional positive does not count as a general claim."""
+    if confounded and outcome in {"Positive", "Conditional positive"}:
+        return "Budget-confounded positive"
+    return outcome
+
+
 def condition_a_pass(per_set: dict[str, dict]) -> bool:
     """Pass when the LLM's point estimate is lower on at least two of the four sets."""
     wins = 0

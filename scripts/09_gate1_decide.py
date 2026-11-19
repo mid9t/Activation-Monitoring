@@ -72,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         deff=deff,
     )
     decision["inputs"] = {path: _sha(Path(path)) for path in args.manifest}
+    categories = data / "gate1" / "categories.json"
+    if categories.is_file():
+        decision["llm_miss_share_low_recall_strata"] = read_json(categories)["llm_miss_share_low_recall_strata"]
+    else:
+        decision["llm_miss_share_low_recall_strata"] = None
     write_json(data / "gate1" / "decision.json", decision)
     if decision["branch"] == "fail_a":
         prompt = swap_classifier_messages(

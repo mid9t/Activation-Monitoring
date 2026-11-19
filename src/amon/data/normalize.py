@@ -49,6 +49,7 @@ def _base_row(**kwargs) -> dict:
         "request_id": kwargs.get("request_id", ""),
         "lang": kwargs.get("lang", ""),
         "is_code": bool(kwargs.get("is_code", False)),
+        "harm_category": kwargs.get("harm_category", "") or "",
         "_source_request": kwargs.get("source_request", ""),
         "_rendered": kwargs.get("rendered", ""),
     }
@@ -181,13 +182,16 @@ def _wildchat(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _prompts(df: pd.DataFrame, source: str, cell: str) -> pd.DataFrame:
+def _prompts(df: pd.DataFrame, source: str, cell: str, category_column: str | None = None) -> pd.DataFrame:
     _require(df, {"prompt"}, source)
     rows = []
     for offset, record in enumerate(df.itertuples(index=False)):
         text = str(getattr(record, "prompt") or "")
         if not text.strip():
             continue
+        category = ""
+        if category_column is not None:
+            category = str(getattr(record, category_column) or "")
         rows.append(
             _base_row(
                 item_id=_row_key(source, str(offset), text),
@@ -199,12 +203,18 @@ def _prompts(df: pd.DataFrame, source: str, cell: str) -> pd.DataFrame:
                 messages=messages_json([{"role": "user", "content": text}]),
                 source_request=text,
                 lang="en",
+                harm_category=category,
             )
         )
     return pd.DataFrame(rows)
 
 
 def _strongreject(df: pd.DataFrame) -> pd.DataFrame:
+    if "category" not in df.columns:
+        raise SchemaError(
+            "StrongREJECT has no category column. Do not infer categories from text. "
+            f"Columns present: {list(df.columns)}"
+        )
     if "forbidden_prompt" in df.columns:
         renamed = df.rename(columns={"forbidden_prompt": "prompt"})
     elif "prompt" in df.columns:
@@ -222,7 +232,7 @@ def _strongreject(df: pd.DataFrame) -> pd.DataFrame:
             "StrongREJECT has neither 'forbidden_prompt' nor 'prompt' nor 'content'. "
             f"Columns present: {list(df.columns)}"
         )
-    return _prompts(renamed, "strongreject", "forbidden")
+    return _prompts(renamed, "strongreject", "forbidden", category_column="category")
 
 
 def _bailey(df: pd.DataFrame) -> pd.DataFrame:

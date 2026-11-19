@@ -1,0 +1,105 @@
+{
+  "pool_size": 628786,
+  "flagged": 1021,
+  "flagged_by_cell": {
+    "ordinary": 645,
+    "non_english": 303,
+    "python": 66,
+    "code": 7
+  },
+  "containment_histogram": {
+    "0.0": 627170,
+    "0.1": 367,
+    "0.2": 92,
+    "0.3": 57,
+    "0.4": 79,
+    "0.5": 214,
+    "0.6": 65,
+    "0.7": 78,
+    "0.8": 134,
+    "0.9": 530
+  },
+  "top_templates": [
+    {
+      "template_id": "61f8f50cdeb8cc66ee339f6e896430975ef80ff4243c42a97a3a5956853c22fb",
+      "n": 321
+    },
+    {
+      "template_id": "734efcead0465edc4202be710c8bccee5243fb85c6e5075dfc333a0f95028366",
+      "n": 118
+    },
+    {
+      "template_id": "482959900a0c252ffa792dd5d9374fc9ef0bac6fbfffd1b1cd4fb8f5fb267c3c",
+      "n": 37
+    },
+    {
+      "template_id": "1fd6cb975bb64298c847d4d9be4ef2b67df0bce1347430e6ea1d3fe0a9a643d0",
+      "n": 22
+    },
+    {
+      "template_id": "2857638617d65bb805075e5611c5e99768489f3d35779b78d0d1beb12e15061d",
+      "n": 20
+    },
+    {
+      "template_id": "0768ef8a320afc292813aa2440da0009023860a6e3f16a394b299d5931d19776",
+      "n": 19
+    },
+    {
+      "template_id": "63ad1e33d2703ec11026759690faad6dabacf9aaaf7e5fb576f86cfbe5569571",
+      "n": 18
+    },
+    {
+      "template_id": "690a551d2afd465dc943812d4a3fdb118cfb1e6ded35f710791313ee19036104",
+      "n": 17
+    },
+    {
+      "template_id": "74838516edaa002669a99f68011469e8cec81201275ed539573f73bce43b0c91",
+      "n": 14
+    },
+    {
+      "template_id": "21eb5180906c66434978c3a38c8a4d4def7a04ccfe5e33127fdba82e4e19a3c8",
+      "n": 13
+    },
+    {
+      "template_id": "08240151a770e8eb9997bc6f5c66f69796f9954ff5816aa6ea81794fbd482b76",
+      "n": 13
+    },
+    {
+      "template_id": "0afd40047f82f9244f0c855d332e3ff120dbba848ae13d408c7148c651dcb3eb",
+      "n": 11
+    },
+    {
+      "template_id": "1caf41a5eca93dfed46742d69537d5a639ea25264184d653e809a8aeb3a8ae18",
+      "n": 10
+    },
+    {
+      "template_id": "2f112012c66f0b493394bdba4b6d77783899d525e5326f6862ea4461174aa6d7",
+      "n": 9
+    },
+    {
+      "template_id": "e8937c0c44b7b1076ba2036c1d801071d4d0366a8d24ee982c42ad07bd949f5f",
+      "n": 9
+    },
+    {
+      "template_id": "b5272b6c04b0bdb4491644021afdb6481700f4b6bc5143327198bd2fbe2823bb",
+      "n": 9
+    },
+    {
+      "template_id": "04740060387697a53b799c0b5ffbd25b87a53ac470d6a340682b2fbbcf3e954f",
+      "n": 8
+    },
+    {
+      "template_id": "562cde31e362475103714df377158689385983e4066767a1b574aa5d0c0e355c",
+      "n": 8
+    },
+    {
+      "template_id": "0d4a41c8b49ec02e6f3badee7c888413e0bac387955a701528cd45a18ff4a78f",
+      "n": 8
+    },
+    {
+      "template_id": "0e4f1d9f9fd5e73fd8d9d612909fefac562032e1c1246fb1f4f212f27159088d",
+      "n": 8
+    }
+  ],
+  "template_containment": 0.5
+}

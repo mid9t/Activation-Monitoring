@@ -8,6 +8,8 @@ from pathlib import Path
 
 from amon.config import load_config, require_paths
 from amon.data import acceptance, normalize, render_and_tokenize, select_pools
+from amon.data.audit import SELECTED_CODE, exclusion_fingerprint
+from amon.data.build import length_accounting
 from amon.data.embed import embed_texts
 from amon.data.resume import ResumeStore, source_hash
 from amon.data.sources import download_raw, load_source
@@ -33,21 +35,25 @@ def main(argv: list[str] | None = None) -> int:
     models = load_config("models.yaml")
     root = paths.data_root
     resume = ResumeStore(root)
-    items, notes = _items(root, data_cfg, models, resume)
+    before, notes = _items(root, data_cfg, models, resume)
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(
         models["monitored"]["repo"], revision=models["monitored"]["revision"]
     )
-    items, tokens, token_report = render_and_tokenize(items, tok, int(data_cfg["max_tokens"]))
+    items, tokens, token_report = render_and_tokenize(before, tok, int(data_cfg["max_tokens"]))
     notes["tokens"] = token_report
     verdict = acceptance(items, tokens, notes, data_cfg)
+    verdict["role_cell"] = _with_targets(length_accounting(before, tokens), data_cfg)
+    verdict["audit"] = notes.get("ordinary_audit", {})
     processed = root / "processed"
     processed.mkdir(parents=True, exist_ok=True)
     public = items.drop(columns=[column for column in items.columns if column.startswith("_")])
     public.to_parquet(processed / "items.parquet", index=False)
     tokens.to_parquet(processed / "tokens.parquet", index=False)
     write_json(processed / "dedup_report.json", notes["dedup"])
+    write_json(processed / "acceptance.json", verdict)
+    write_json(processed / "ordinary_audit.json", notes.get("ordinary_audit", {}))
     splits = processed / "splits"
     splits.mkdir(exist_ok=True)
     hashes = {}
@@ -60,8 +66,13 @@ def main(argv: list[str] | None = None) -> int:
         notes["a1_insertions"].to_parquet(processed / "a1_insertions.parquet", index=False)
     rubric = Path("prereg/rubric.md")
     rubric_sha = sha256_file(rubric) if rubric.is_file() else None
-    write_draft(Path("prereg/gate1_memo.md"), hashes, int(data_cfg["seed"]), rubric_sha)
-    outputs = [processed / "items.parquet", *sorted(splits.glob("*.ids"))]
+    write_draft(Path("prereg/gate1_memo.draft.md"), hashes, int(data_cfg["seed"]), rubric_sha)
+    outputs = [
+        processed / "items.parquet",
+        processed / "acceptance.json",
+        processed / "ordinary_audit.json",
+        *sorted(splits.glob("*.ids")),
+    ]
     manifest = write_manifest(
         processed,
         list((root / "raw").rglob("sha256.txt")),
@@ -74,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         print("stage 01 acceptance failed", file=sys.stderr)
         return 1
     print(
-        "CHECKPOINT 1. Review prereg/gate1_memo.md, edit it, commit it, and tag gate1-prereg. "
+        "CHECKPOINT 1. The draft is prereg/gate1_memo.draft.md. "
+        "prereg/gate1_memo.md was not modified. The owner reviews, commits, and tags gate1-prereg. "
         "The agent does not tag it.",
         file=sys.stderr,
     )
@@ -103,15 +115,9 @@ def _items(root, data_cfg: dict, models: dict, resume: ResumeStore):
     selected_fp = {
         "sources": {name: resume.frame_sha(f"normalized_{name}") for name in SOURCES},
         "data": source_hash("configs/data.yaml"),
-        "code": source_hash(
-            "src/amon/data/build.py",
-            "src/amon/data/dedup.py",
-            "src/amon/data/groups.py",
-            "src/amon/data/templates.py",
-            "src/amon/data/embed.py",
-            "src/amon/data/normalize.py",
-        ),
+        "code": source_hash(*SELECTED_CODE),
         "embed_key": embed_key,
+        "exclusions": exclusion_fingerprint(data_cfg["ordinary_audit"]["exclusions"]),
     }
     selected = resume.load_selected(selected_fp)
     if selected is not None:
@@ -138,6 +144,15 @@ def _items(root, data_cfg: dict, models: dict, resume: ResumeStore):
     resume.save_selected(items, notes, selected_fp)
     print(f"saved selected items: {len(items)}", flush=True)
     return items, notes
+
+
+def _with_targets(rows: list[dict], cfg: dict) -> list[dict]:
+    from amon.data.build import _target_map
+
+    targets = _target_map(cfg)
+    for row in rows:
+        row["target"] = targets.get((row["role"], row["cell"]))
+    return rows
 
 
 def _spec(models: dict, name: str) -> dict:

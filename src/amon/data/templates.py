@@ -51,6 +51,9 @@ def build_templated_jailbreaks(
             template_id = str(template["template_id"])
             request_id = str(request["request_id"])
             identity = item_id("a1", f"{template_id}\n{request_id}")
+            category = ""
+            if "harm_category" in request.index:
+                category = "" if pd.isna(request["harm_category"]) else str(request["harm_category"])
             rows.append(
                 {
                     "item_id": identity,
@@ -65,6 +68,7 @@ def build_templated_jailbreaks(
                     "request_id": request_id,
                     "lang": "en",
                     "is_code": bool(is_code(text)),
+                    "harm_category": category,
                     "_source_request": normalize_text(str(request["text"])),
                     "_rendered": "",
                 }

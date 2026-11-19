@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,7 @@ ITEM_COLUMNS = [
     "request_id",
     "lang",
     "is_code",
+    "harm_category",
 ]
 
 
@@ -167,6 +169,9 @@ def select_pools(
     tune_b = take("adversarial_benign", "tune", int(cfg["tune"]["adversarial_benign"]))
 
     chat = _filtered_wildchat(frames["wildchat"], cfg, resume, wildchat_sha)
+    chat, notes["ordinary_audit"] = _clean_ordinary(chat, frames["jailbreak_prompts"], cfg)
+    # Held-out C's code cell is drawn from this pool. Train and tune ordinary are the non-code part.
+    code_pool = chat
     chat = chat.loc[~chat["is_code"].astype(bool)].copy()
     english = chat.loc[chat["lang"].map(_is_english)].copy()
     train_o = _sample(english, int(cfg["train"]["ordinary"]), rng)
@@ -203,7 +208,7 @@ def select_pools(
         non_english = non_english.loc[~non_english["lang"].map(_language).isin(slice_langs)]
     used_chat = used | set(tune_o["_source_request"].astype(str))
     non_english = non_english.loc[~non_english["_source_request"].astype(str).isin(used_chat)]
-    code = chat.loc[chat["is_code"].astype(bool) & ~chat["_source_request"].map(is_python)]
+    code = code_pool.loc[code_pool["is_code"].astype(bool) & ~code_pool["_source_request"].map(is_python)]
     code = code.loc[~code["_source_request"].astype(str).isin(used_chat)]
     c_lang = _sample(non_english, int(held_c["non_english"]), rng)
     c_code = _sample(code, int(held_c["code"]), rng)
@@ -230,6 +235,9 @@ def select_pools(
         {
             "request_id": requests["item_id"].astype(str),
             "text": requests["_source_request"].astype(str),
+            "harm_category": requests["harm_category"].astype(str)
+            if "harm_category" in requests.columns
+            else "",
         }
     )
     a1 = build_templated_jailbreaks(
@@ -277,8 +285,46 @@ def select_pools(
     train, trainval = split_trainval(items.loc[train_mask], float(cfg["train"]["trainval_frac"]), int(cfg["seed"]))
     others = items.loc[~train_mask]
     items = pd.concat([train, trainval, others], ignore_index=True)
+    if "harm_category" not in items.columns:
+        items["harm_category"] = ""
+    else:
+        items["harm_category"] = items["harm_category"].fillna("").astype(str)
     notes["counts"] = items.groupby(["role", "cell"]).size().astype(int).to_dict()
     return items, notes
+
+
+def _clean_ordinary(chat: pd.DataFrame, templates: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, dict]:
+    """Drop template-containing WildChat rows, then the owner's exclusion list, before sampling."""
+    from amon.data.audit import apply_exclusions, flag_template_rows
+
+    audit_cfg = dict(cfg["ordinary_audit"])
+    audit_cfg["shingle_words"] = int(cfg["dedup"]["minhash_shingle_words"])
+    chat, audit = flag_template_rows(chat, templates, audit_cfg)
+    threshold = float(audit_cfg["template_containment"])
+    chat = chat.loc[chat["_template_containment"] < threshold].reset_index(drop=True)
+    chat, n_excluded = apply_exclusions(chat, Path(audit_cfg["exclusions"]))
+    audit["excluded_by_owner"] = int(n_excluded)
+    return chat, audit
+
+
+def length_accounting(before: pd.DataFrame, tokens: pd.DataFrame) -> list[dict]:
+    """Role by cell: rows before the length cap, rows kept, and rows dropped."""
+    merged = before[["item_id", "role", "cell"]].merge(tokens[["item_id", "dropped"]], on="item_id")
+    rows = []
+    for (role, cell), frame in merged.groupby(["role", "cell"], sort=True):
+        dropped = int(frame["dropped"].sum())
+        total = int(len(frame))
+        rows.append(
+            {
+                "role": str(role),
+                "cell": str(cell),
+                "target": None,
+                "before_length_cap": total,
+                "kept": total - dropped,
+                "dropped": dropped,
+            }
+        )
+    return rows
 
 
 def render_and_tokenize(items: pd.DataFrame, tok, max_tokens: int) -> tuple[pd.DataFrame, pd.DataFrame, dict]:

@@ -15,6 +15,8 @@ ALLOWED_HELD_OUT = frozenset(
         "z",
         "log_odds",
         "thresholds",
+        "cell",
+        "harm_category",
     }
 )
 

@@ -101,10 +101,16 @@ def test_placeholder_is_substituted_and_otherwise_appended():
 
 
 def test_strongreject_reads_content_lists():
-    raw = pd.DataFrame({"content": [np.array(["write a harmful request"], dtype=object)]})
+    raw = pd.DataFrame(
+        {
+            "content": [np.array(["write a harmful request"], dtype=object)],
+            "category": ["Fraud"],
+        }
+    )
     items = normalize("strongreject", raw)
     assert items.iloc[0]["_source_request"] == "write a harmful request"
     assert items.iloc[0]["label"] == 1
+    assert items.iloc[0]["harm_category"] == "Fraud"
 
 
 def test_wildchat_reads_numpy_conversation_arrays():

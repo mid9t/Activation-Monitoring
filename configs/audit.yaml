@@ -1,0 +1,7 @@
+# Contingency judge for the ordinary-cell sweep. Off unless the owner turns it on.
+# Never point this at Llama Guard or the probe.
+enabled: false
+judge: null
+rubric: prereg/rubric.md
+confirm_n: 50
+confirm_min: 40
