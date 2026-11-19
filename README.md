@@ -1,147 +1,107 @@
-# Activation Monitoring: Five-Week Project Plan
+# Activation Monitoring
 
-Do epistemic deferral signals beat the optimal score band in a probe-to-LLM cascade?
+An open-weights, public-data follow-up to Kramár et al., [Building Production-Ready Probes for Gemini](https://arxiv.org/abs/2601.11516) (DeepMind, 2026).
 
-October 12 – November 13, 2026 · Prepared October 10, 2026
+The harness is the `amon` package. It trains a linear activation probe on Llama-3-8B-Instruct, scores every prompt with Llama Guard 3, and tests whether any signal other than the probe score can choose a better set of prompts to send to the guard. The baseline it has to beat is the two-threshold cascade from that paper, fit at a fixed 5% deferral budget.
 
-[Gate 1 Implementation Plan and Training Protocols](docs/gate1_implementation_plan.md) (October 23, 2026) fixes the choices this plan left open: the schedule after kill criterion 3, the data mix, compute and storage, and the training protocols. The gate rules below stay as written. Choices that document still lists as open are due before Monday, October 26.
+The decision rules are pre-registered in [`prereg/gate1_memo.md`](prereg/gate1_memo.md). The October schedule and the compute plan that produced this harness are kept in [`docs/gate1_implementation_plan.md`](docs/gate1_implementation_plan.md).
 
-The harness is the `amon` package. `make test` runs the unit tests. Stages `00` through `10` are the scripts in `scripts/`.
+## What DeepMind showed
 
-## Goal
+Kramár et al. monitor Gemini 2.5 Flash for cyber-offensive prompts. A small probe reads the model’s residual stream and classifies most requests on its own. Requests whose probe score falls between two thresholds go to a prompted Gemini classifier. Their cascade is
 
-By Friday, November 13, complete and write up a pre-specified test, on Llama-3-8B-Instruct with public data, of whether any epistemic deferral signal lowers the error of a probe-to-LLM cascade below DeepMind’s optimal two-threshold score band on held-out distribution shifts. Release the harness with it.
+```text
+score ≤ t0          → benign
+t0 < score < t1     → asked of the language-model classifier
+score ≥ t1          → harmful
+```
 
-Either outcome is a contribution. A win is new evidence for a better deferral rule. A null is an independent open-weights replication of the cascade with larger error sets, plus a measured ceiling on what any better rule could gain. DeepMind asks for follow-up on open weights and open data, and its own cascade comparisons had mostly overlapping confidence intervals.
+which is their Equation 11. A symmetric band around the probe’s decision threshold is a simpler heuristic; the two free thresholds are the optimal rule of this form (Appendix E). On their cyber evaluation, deferring to Gemini 2.5 Flash about 8% of the time (under 10% in the text) beats both the probe alone and the prompted model alone, at roughly a fiftieth of the prompted model’s cost. The same work put probes of this kind into user-facing Gemini.
 
-## Setup, fixed before week 1
+The error they minimize (Equation 12) weights a miss by 5, a false alarm on a hard negative by 2, and a false alarm on ordinary traffic by 50. Ordinary-traffic false alarms dominate because benign traffic is common and a false alarm there is expensive. Their cascade plots have wide intervals. The paper closes by inviting further work on the open-weights experiments in Appendix A, which re-run the probe architectures on Gemma-2 9B and public classification tasks. This repository takes the cascade itself onto a public harmful-request benchmark with an open model.
 
-- **Model and task:** Llama-3-8B-Instruct, the model Bailey et al. monitored and released jailbreak sets for. The task is input monitoring for harmful requests.
+Their main engineering result is the probe. Mean-pooled linear probes lose accuracy when the context gets long, and they introduce MultiMax and max-of-rolling-means attention probes, plus an architecture search with AlphaEvolve, to close that gap. Long context, multi-turn conversations, and adaptive attacks are the shifts they treat as production-relevant. Jailbreaks stay hard for every method they try.
 
-- **First stage:** logistic regression on last-prompt-token activations at one middle layer. Hold back a stronger probe (a small MLP over several layers) for the week-4 robustness check.
+## What this repository tests
 
-- **Second stage:** an open guard model, or the 8B model prompted as a classifier, run on every item.
+This study keeps their cascade and their weights, and asks a question they leave open. Once `t0` and `t1` are chosen to minimize weighted error at a fixed deferral budget, does any other quantity computed from the same activations pick a better 5% of prompts to send to the second stage?
 
-- **Data roles:**
+The baseline rule is their score band: defer the prompts whose probe logit sits between `t0` and `t1`. The candidate rules replace that interval with a set of the same size chosen by another signal:
 
-  - **Train:** WildJailbreak’s direct harmful and direct benign requests, plus ordinary chat.
+- **Ensemble disagreement.** Standard deviation of the logit across 20 logistic probes fit on grouped bootstrap resamples of the training set. High disagreement means defer.
+- **Class-conditional density.** Minimum squared Mahalanobis distance to three Gaussians fit on the training activations (harmful, WildJailbreak-benign, ordinary chat), with one Ledoit–Wolf covariance shared across classes. Far from every training class means defer.
 
-  - **Tune shift:** WildJailbreak’s jailbreak-style harmful and benign cells. All fitting and Gate 2 happen here.
+The probe logit itself is the margin, and it is the band. Token count and activation norm are controls a signal has to beat before it is kept. A kept rule is then frozen and scored once on held-out shifts. A win is a lower weighted cascade error than the band, with a paired-bootstrap interval that excludes zero. A null is an open replication of the cascade plus a count of how many confident probe errors the guard could still fix (the headroom). That count is the ceiling on what any better deferral rule could gain.
 
-  - **Held-out shifts**, 20,000 items or more each where the data allows:
+Held-out prompts are locked until that freeze. `amon.guard` refuses any read of a held-out split that asks for a non-baseline signal before `prereg/freeze.json` exists.
 
-    - (A) public jailbreak templates applied to held-out harmful requests, the recipe DeepMind used for its jailbreak set, plus Bailey’s released jailbreaks;
+## Where the two studies differ
 
-    - (B) benign-but-harmful-sounding prompts from a separate source;
+| | Kramár et al. | This study |
+| --- | --- | --- |
+| Model | Gemini 2.5 Flash | Llama-3-8B-Instruct, revision pinned in `configs/models.yaml` |
+| Task | Cyber-offensive input monitoring | Harmful-request input monitoring, across hazard types |
+| Probe | Several architectures. The linear baseline mean-pools token activations at a middle layer. The probes they select are MultiMax and max-of-rolling-means attention. | L2 logistic regression on the last prompt token, at one layer chosen from {8, 12, 16, 20, 24}, with layer 16 preferred on a tie. The cache also stores the mean over prompt tokens. |
+| Second stage | Prompted Gemini 2.5 Flash, Pro, or Flash-Lite, parsed as a hard label | Llama Guard 3 8B. The score is the log-odds of unsafe versus safe, then a threshold. |
+| Data | Internal Gemini traffic and expert-labeled cyber sets | Public sets only. See the table below. |
+| Shifts the result is about | Long context, multi-turn, existing jailbreaks, adaptive red teaming | (A) jailbreak templates and released jailbreaks, (B) benign prompts that sound harmful, (C) code and non-English chat |
+| Cascade | Equation 11. They sweep `(t0, t1)` and report operating points that call the language model on under 10% of queries. | The same rule. The decision uses a budget of 5% of tune-pool items. A 10% budget is reported beside it. |
+| Weights | Equation 12: 5 / 2 / 50, as a weighted average of per-dataset rates | The same 5 / 2 / 50. Each item’s cost is its group’s weight divided by the group’s size, so a smaller group still contributes its full weight. |
+| Where thresholds are fit | A validation mix. One frontier plot sweeps thresholds and reads the test set. | The tune pool only. Held-out splits are scored with thresholds that are already frozen. |
+| Past the band | The band is the method. | Whether ensemble disagreement or density beats the band at the same budget. |
 
-    - (C) new benign traffic such as code and non-English prompts.
+Two consequences of those choices are worth stating on their own.
 
-- **Deferral signals:** margin (the baseline), bootstrap-ensemble disagreement, class-conditional density, and evidential vacuity. Token count and activation norm are controls.
+The probe here is the linear probe from their Section 3.1.1, read at the last prompt token. Their MultiMax and attention probes answer a long-context question. Items longer than 2,048 tokens are dropped, so every prompt in this study stays short. Long context, multi-turn inputs, adaptive attacks, and output monitoring are the shifts their paper treats as production-relevant; the shifts here are jailbreaks, harmful-sounding benign prompts, and new ordinary traffic.
 
-- **Metric:** weighted cascade error using DeepMind’s weights (50 for false alarms on ordinary traffic, 5 for misses, 2 for false alarms on hard negatives), at 5% deferral with 10% as a secondary point. Fix thresholds on the tune shift and report the realized deferral rate on each held-out shift.
+The second stage returns a probability, so it receives the same kind of weighted-error threshold as the probe. Their prompted classifiers return a parsed label, and the cascade uses that label directly.
 
-- **Out of scope:** adaptive attacks, long context, output monitoring, a second model. These were cut from the earlier 8–10 week scope.
+The metric uses their weights and pools them differently. Equation 12 averages each dataset’s error rate and then weights those rates. Here a miss, a hard-negative false alarm, and an ordinary false alarm are three groups, and an item in a group of size `N` costs `w / N`. A group that came out smaller than planned still contributes its full 5, 2, or 50. On a held-out shift that contains only one class, the comparison is that class’s error rate.
 
-Compute is small: an estimated one to two GPU-days on a single card for caching and LLM labels.
+## Data
 
-## Schedule
+Every label comes from the source dataset. A blinded hand check of confident errors estimates how often that label is wrong; those labels are used only to discount the headroom count.
 
-The table is the plan as fixed on October 10. Execution dates, and the cuts if kill criterion 3 is applied, are in the [Gate 1 implementation plan](docs/gate1_implementation_plan.md).
+| Role | What it is | Used for |
+| --- | --- | --- |
+| Train | WildJailbreak vanilla harmful and vanilla benign, plus ordinary English WildChat turns | Probe, ensemble, and density |
+| Tune | WildJailbreak adversarial harmful and adversarial benign, plus a disjoint ordinary WildChat slice | Llama Guard threshold, the score band, and every deferral rule |
+| Held-out A | 100 in-the-wild jailbreak templates applied to StrongREJECT requests, plus Bailey et al.’s released Llama-3 jailbreaks | Jailbreak shift. Harmful. |
+| Held-out B | OR-Bench and the safe prompts from XSTest | Benign prompts that sound harmful |
+| Held-out C | WildChat in languages and code styles held out of the tune slice | New ordinary traffic |
+| Pipeline | Bailey et al.’s harmful and benign instruction splits | A mixed-class check that no decision uses |
 
-| Week      | Work                                                                                                                                | Ends with  |
-|---------------|-----------------------------------------------------------------------------------------------------------------------------------------|----------------|
-| 1 (Oct 12–16) | Cache activations, train the probe, get LLM labels for every item, fit the optimal band, count headroom, hand-check 50 confident errors | Gate 1         |
-| 2 (Oct 19–23) | Compute all signals on the tune shift; run the exchange test                                                                            | Gate 2         |
-| 3 (Oct 26–30) | Fit at most two deferral rules on the tune shift; confound and stability checks                                                         | Freeze         |
-| 4 (Nov 2–6)   | Open the held-out shifts once; paired bootstrap; repeat with the stronger probe                                                         | Final decision |
-| 5 (Nov 9–13)  | Write up; release code, cached features and harness                                                                                     | Ship           |
+Train and tune never share a source request. Near-duplicates across roles are removed with MinHash and with MiniLM embeddings. Ordinary WildChat rows that contain a jailbreak template are dropped before sampling, and a blinded audit of the remainder can exclude more. The build seed is `20261026`. About 228,000 items remain after the length drop.
 
-## Gates and decision rules
+## How a run proceeds
 
-### Gate 1 (Oct 16): is there anything to gain?
+Data lives under `$AMON_DATA`, outside the repository. Model and dataset revisions are pinned in `configs/models.yaml` and loaded at that revision.
 
-This uses margin only. On held-out shifts, only baseline counts are allowed at this point.
+```bash
+export AMON_DATA=~/amon-data
+export HF_HOME=$AMON_DATA/hf
+export AMON_DEVICE=cuda          # or mps
+```
 
-- **Pass** needs both:
+`make test` runs the unit tests. The numbered scripts in `scripts/` are the stages, and each one reads only the outputs of the stages before it.
 
-  - (a) the LLM classifier has lower weighted error than the probe on at least two shifted sets;
+| Stage | What it writes |
+| --- | --- |
+| `00_check_access` | Confirms the gated model and dataset licenses |
+| `01_build_data` | One item table and the frozen split files |
+| `01b_ordinary_audit` | The ordinary-traffic exclusion audit |
+| `02_cache_activations` | Last-token and mean-pooled residual stream at layers 8, 12, 16, 20, and 24 |
+| `03_score_llamaguard` | Log-odds for every item |
+| `04_train_probe` | The logistic probe. Layer and `C` are chosen by grouped cross-validation on train. |
+| `05_fit_thresholds` | Llama Guard’s threshold, the 5% and 10% bands, and the probe-only threshold, all on the tune pool |
+| `06`–`09` | Headroom, the hand-check sample, and the Gate 1 decision |
+| `10_fit_signals` | Ensemble and density on train, train-val, and tune. Runs only after Gate 1 passes, and the guard still blocks held-out splits. |
 
-  - (b) at 5% deferral, at least 200 confident probe errors that the LLM would fix remain on one held-out shift, and they make up a quarter of the cascade’s remaining errors after discounting the label-error rate from the hand check.
+Gate 1 asks whether the cascade has anything left to gain: the guard has to beat the probe on shifted data, and one held-out shift has to contain enough confident probe errors that the guard would correct. Those two conditions, the discount for mislabeled hand-check items, and the rule for which shift the final comparison uses are specified in the [Gate 1 memo](prereg/gate1_memo.md). The memo also records the departures from each equation in Kramár et al.
 
-- **Fail (a):** swap the second stage once, allowing two days. If it still fails, apply kill criterion 1.
+## References
 
-- **Fail (b):** skip weeks 2–3 and take the null branch. Report the headroom and the open replication, and spend the spare time on the stronger probe and a second LLM classifier.
-
-### Gate 2 (Oct 23): does any signal find those errors?
-
-Tune shift only.
-
-- **Pass:** for at least one non-control signal, both of these hold:
-
-  - the confident items in its top 1% of traffic have a higher net fix rate (LLM fixes minus LLM breaks) than the least useful 1% inside the band, with the bootstrap interval for the difference above zero;
-
-  - it beats token count on the same test.
-
-- **Fail:** take the null branch, with the per-signal exchange rates as part of the result.
-
-### Freeze (Oct 30)
-
-Before opening held-out data, write down the rules, budget, weights, shifts and success test. Carry forward at most two rules: a swap rule on the best signal, and a margin-plus-signal rule.
-
-### Final decision (Nov 6)
-
-- **Positive:** the frozen rule lowers weighted cascade error against the optimal band at 5% deferral, with a 95% paired-bootstrap interval excluding zero, on at least two held-out shifts, and this holds with the stronger probe.
-
-- **Partial:** it wins on one shift only, or only with the weak probe. Report it as shift-specific with no general claim.
-
-- **Null:** anything else. Report the intervals and the headroom.
-
-## Kill criteria
-
-1.  **No usable second stage** after one swap. Stop the cascade study and switch to the density audit (the four WildJailbreak cells plus benign shift) on the same activations.
-
-2.  **Label noise.** More than 15 of the 50 hand-checked confident errors are mislabeled, and relabeling isn’t feasible in three days.
-
-3.  **Schedule.** No optimal band and headroom count by Wednesday, October 21. Cut to one held-out shift, drop the evidential arm, and skip the stronger probe.
-
-4.  **Per signal.** Drop any signal that fails to beat token count, or whose rank correlation with a kept signal exceeds 0.95.
-
-5.  **Scope.** Add nothing from the out-of-scope list, whatever the results suggest.
-
-## In production
-
-- **What it becomes:** a deferral policy, a small deterministic function of probe-side features, for a probe-first cascade. DeepMind reports deploying misuse-mitigation probes in user-facing Gemini.
-
-- **Who would use it:** lab safety teams, and anyone self-hosting an open-weights model with a guard model. In DeepMind’s results the cascade called the LLM less than 10% of the time.
-
-- **Cost:** it reuses activations the model already computes and adds a few small heads or one distance computation per request.
-
-- **Rollout path:**
-
-  1. Shadow mode: log what each rule would defer and act on nothing.
-
-  2. Set thresholds to a deferral budget on recent traffic and track the realized deferral rate; a jump signals drift.
-
-  3. Send a sample of high-uncertainty items to human review and feed the labels back into probe training, the loop Anthropic describes for anomaly detectors.
-
-  4. Only then let the rule route requests.
-
-- **What a deployer must redo:** validation on their own probes and traffic, including long-context and multi-turn inputs.
-
-- **Design constraints:**
-
-  - Keep the rule deterministic, since DeepMind notes that randomized policies invite repeated-query attacks.
-
-  - Treat it as a cost and coverage component, not a security boundary: Bailey et al. showed that attacks trained against a Gaussian detector also fool input-based probes.
-
-- **If the result is null:** deployers can keep the two-threshold band with evidence behind it, and the headroom figure tells them how much a better rule could ever buy.
-
-## Sources
-
-- Kramár et al., [Building Production-Ready Probes For Gemini](https://arxiv.org/abs/2601.11516)
-
-- Bailey et al., [Obfuscated Activations Bypass LLM Latent-Space Defenses](https://arxiv.org/html/2412.09565)
-
-- Jiang et al., [WildTeaming at Scale (WildJailbreak)](https://arxiv.org/abs/2406.18510)
-
-- Anthropic, [Recommendations for Technical AI Safety Research Directions](https://alignment.anthropic.com/2025/recommended-directions/)
+- Kramár et al., [Building Production-Ready Probes for Gemini](https://arxiv.org/abs/2601.11516). The cascade (Equation 11) and the weights (Equation 12) that this study reimplements on public data.
+- Bailey et al., [Obfuscated Activations Bypass LLM Latent-Space Defenses](https://arxiv.org/abs/2412.09565). Source of the released Llama-3 jailbreaks, and the reason a probe is treated as a cost-saving stage rather than a security boundary.
+- Jiang et al., [WildTeaming at Scale](https://arxiv.org/abs/2406.18510). WildJailbreak, the train and tune harmful and hard-negative cells.
+- Cunningham et al., [Cost-Effective Constitutional Classifiers via Representation Re-use](https://alignment.anthropic.com/2025/cheap-monitors/) (2025). The earlier probe-to-language-model cascade that Kramár et al. cite.
